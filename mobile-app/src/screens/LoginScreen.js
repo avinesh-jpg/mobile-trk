@@ -75,12 +75,12 @@ export default function LoginScreen({ onLoginSuccess }) {
             placeholderTextColor="#64748b"
           />
 
-          <Text style={styles.label}>Backend Server Host (Wi-Fi IP)</Text>
+          <Text style={styles.label}>Cloud Server Host</Text>
           <TextInput
             style={[styles.input, styles.inputServer]}
             value={serverHost}
             onChangeText={setServerHost}
-            placeholder="http://192.168.1.43:8000/api/v1"
+            placeholder="https://geotrack-backend-e812.onrender.com/api/v1"
             placeholderTextColor="#64748b"
           />
 
