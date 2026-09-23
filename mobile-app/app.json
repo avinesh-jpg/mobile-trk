@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "GeoTrack Field App",
+    "slug": "geotrack-field-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": ["location", "fetch"],
+        "NSLocationWhenInUseUsageDescription": "GeoTrack needs your location to track field work during active shifts.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "GeoTrack tracks your location in the background during working hours for automated client visit logging.",
+        "NSMotionUsageDescription": "GeoTrack uses motion detection to optimize battery consumption."
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "ACTIVITY_RECOGNITION"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow GeoTrack to access your location to track travel and client visits."
+        }
+      ]
+    ]
+  }
+}
