@@ -19,7 +19,7 @@ services:
         value: 43200
 
   # 2. React Web Dashboard (Static Site - Free Tier)
-  - type: static
+  - type: web
     name: geotrack-dashboard
     runtime: static
     rootDir: web-dashboard
