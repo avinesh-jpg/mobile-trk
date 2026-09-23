@@ -12,6 +12,7 @@ import * as Battery from 'expo-battery';
 import { Accelerometer } from 'expo-sensors';
 import { LOCATION_TASK_NAME } from '../config';
 import api from '../services/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { syncOfflineLocations } from '../services/offlineStorage';
 
 export default function TrackingScreen({ user, onLogout }) {
@@ -19,10 +20,12 @@ export default function TrackingScreen({ user, onLogout }) {
   const [activity, setActivity] = useState('still');
   const foregroundWatcher = useRef(null);
 
-  // Monitor motion sensor and check initial tracking state
+  // Restore tracking state if Android OS restarted the app during permission grant
   useEffect(() => {
-    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then((started) => {
-      setIsTracking(started);
+    AsyncStorage.getItem('shift_active').then((active) => {
+      if (active === 'true') {
+        startTracking(true);
+      }
     });
 
     const sensorSub = Accelerometer.addListener((accelData) => {
@@ -84,47 +87,69 @@ export default function TrackingScreen({ user, onLogout }) {
     }
   };
 
-  const startTracking = async () => {
-    const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
-    if (fgStatus !== 'granted') {
-      Alert.alert('Permission Required', 'Location permission is required during active shift.');
-      return;
-    }
-
+  const startTracking = async (isResuming = false) => {
     try {
-      // 1. High GPS accuracy captures satellite coordinates
-      // 2. 3-second / 2-meter interval for Rapido/Uber style ultra-fast real-time updates
+      const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
+      if (fgStatus !== 'granted') {
+        if (!isResuming) {
+          Alert.alert('Permission Required', 'Precise location is required while on active shift.');
+        }
+        return;
+      }
+
+      // Stop any existing watcher before starting a new one
+      if (foregroundWatcher.current) {
+        foregroundWatcher.current.remove();
+        foregroundWatcher.current = null;
+      }
+
+      // 1. High GPS accuracy captures satellite coordinates every 3s
       foregroundWatcher.current = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.High,
-          timeInterval: 3000, // Every 3 seconds (Rapido/Uber real-time frequency)
-          distanceInterval: 2, // Every 2 meters (detects small movements immediately)
+          timeInterval: 3000,
+          distanceInterval: 2,
         },
         (loc) => {
           sendLocationPing(loc.coords, loc.mocked);
         }
       );
 
-      // Background tracking for standalone APK
-      try {
-        const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
-        if (bgStatus === 'granted') {
-          await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-            accuracy: Location.Accuracy.High,
-            timeInterval: 5000, // Every 5 seconds in background
-            distanceInterval: 5, // Every 5 meters in background
-            foregroundService: {
-              notificationTitle: 'GeoTrack Shift Active',
-              notificationBody: 'Live tracking active (< 3s real-time stream).',
-              notificationColor: '#0284c7',
-            },
-          });
-        }
-      } catch (bgErr) {}
-
+      // Persist active shift so Android restarts don't lose tracking
+      await AsyncStorage.setItem('shift_active', 'true');
       setIsTracking(true);
+
+      // 2. Safe background location check (prevents Android activity recreation crash)
+      try {
+        const bgCheck = await Location.getBackgroundPermissionsAsync();
+        let bgGranted = bgCheck.status === 'granted';
+
+        // Only ask if not already granted and not an auto-resume
+        if (!bgGranted && !isResuming) {
+          const bgReq = await Location.requestBackgroundPermissionsAsync();
+          bgGranted = bgReq.status === 'granted';
+        }
+
+        if (bgGranted) {
+          const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+          if (!alreadyRunning) {
+            await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+              accuracy: Location.Accuracy.High,
+              timeInterval: 5000,
+              distanceInterval: 5,
+              foregroundService: {
+                notificationTitle: 'GeoTrack Shift Active',
+                notificationBody: 'Live tracking active (< 3s real-time stream).',
+                notificationColor: '#0284c7',
+              },
+            });
+          }
+        }
+      } catch (bgErr) {
+        console.log('Background task fallback to foreground:', bgErr.message);
+      }
     } catch (err) {
-      Alert.alert('Error', err.message);
+      console.error('Tracking start error:', err);
     }
   };
 
@@ -134,10 +159,14 @@ export default function TrackingScreen({ user, onLogout }) {
         foregroundWatcher.current.remove();
         foregroundWatcher.current = null;
       }
-      const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-      if (running) {
-        await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
-      }
+      try {
+        const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+        if (running) {
+          await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+        }
+      } catch (e) {}
+
+      await AsyncStorage.removeItem('shift_active');
       setIsTracking(false);
       setActivity('still');
 
