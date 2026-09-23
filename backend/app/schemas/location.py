@@ -43,3 +43,5 @@ class UserLiveStatus(BaseModel):
     role: str
     latest_location: Optional[LocationOut] = None
     is_online: bool = False
+    today_distance_km: float = 0.0
+    week_distance_km: float = 0.0

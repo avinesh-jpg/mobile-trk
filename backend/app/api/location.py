@@ -7,7 +7,7 @@ from app.api.deps import get_db, get_current_user, require_admin
 from app.api.websocket import manager
 from app.db.models import User, Location
 from app.schemas.location import LocationPing, LocationBatch, LocationOut, UserLiveStatus
-from app.ml.anomaly import detect_gps_spoofing, filter_clean_trajectory
+from app.ml.anomaly import detect_gps_spoofing, filter_clean_trajectory, calculate_real_travel_distance
 
 router = APIRouter(prefix="/location", tags=["Location & Telemetry"])
 
@@ -201,6 +201,26 @@ def get_all_latest_locations(
                 loc_data.activity_type = "still"
             latest_loc_out = loc_data
 
+        # Calculate employee's distance today (resets daily at 00:00 UTC)
+        start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_points = (
+            db.query(Location)
+            .filter(Location.user_id == emp.id, Location.recorded_at >= start_of_today)
+            .order_by(Location.recorded_at.asc())
+            .all()
+        )
+        today_meters = calculate_real_travel_distance(today_points)
+
+        # Calculate employee's distance for current week (resets every Monday 00:00 UTC)
+        start_of_week = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        week_points = (
+            db.query(Location)
+            .filter(Location.user_id == emp.id, Location.recorded_at >= start_of_week)
+            .order_by(Location.recorded_at.asc())
+            .all()
+        )
+        week_meters = calculate_real_travel_distance(week_points)
+
         results.append(
             UserLiveStatus(
                 user_id=emp.id,
@@ -208,10 +228,25 @@ def get_all_latest_locations(
                 email=emp.email,
                 role=emp.role,
                 latest_location=latest_loc_out,
-                is_online=is_online
+                is_online=is_online,
+                today_distance_km=round(today_meters / 1000.0, 2),
+                week_distance_km=round(week_meters / 1000.0, 2)
             )
         )
     return results
+
+@router.post("/purge-older-than-7-days")
+def purge_old_telemetry(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """
+    Wipes raw breadcrumb locations older than 7 days to maintain weekly cycle and lightweight DB.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    deleted_count = db.query(Location).filter(Location.recorded_at < cutoff).delete()
+    db.commit()
+    return {"message": f"Successfully purged {deleted_count} telemetry records older than 7 days."}
 
 @router.get("/history/{user_id}", response_model=List[LocationOut])
 def get_location_history(

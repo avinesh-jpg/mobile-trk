@@ -243,6 +243,18 @@ export default function LiveMap({ liveFeed }) {
     ? [selectedUser.latest_location.latitude, selectedUser.latest_location.longitude]
     : [11.1542, 77.3060];
 
+  const handleWeeklyPurge = async () => {
+    if (window.confirm("Purge old raw GPS records older than 7 days? This resets historical breadcrumbs while preserving timesheets.")) {
+      try {
+        const res = await api.post('/location/purge-older-than-7-days');
+        alert(res.data.message);
+        fetchEmployees();
+      } catch (err) {
+        console.error('Purge error:', err);
+      }
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col md:flex-row h-[calc(100vh-4rem)] w-full overflow-hidden">
       
@@ -254,13 +266,22 @@ export default function LiveMap({ liveFeed }) {
             <h2 className="text-sm font-bold text-white uppercase tracking-wider">Field Personnel</h2>
             <p className="text-xs text-slate-400">{employees.length} Field Technicians</p>
           </div>
-          <button
-            onClick={fetchEmployees}
-            title="Refresh Fleet"
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition cursor-pointer"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={handleWeeklyPurge}
+              title="Purge raw logs older than 7 days"
+              className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition cursor-pointer text-xs"
+            >
+              🧹 7-Day Purge
+            </button>
+            <button
+              onClick={fetchEmployees}
+              title="Refresh Fleet"
+              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition cursor-pointer"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Employee Cards List */}
@@ -311,18 +332,36 @@ export default function LiveMap({ liveFeed }) {
                 </div>
 
                 {hasLocation ? (
-                  <div className="grid grid-cols-3 gap-1 pt-2 border-t border-slate-800/80 text-[11px] text-slate-300">
-                    <div className="flex items-center gap-1">
-                      <Activity className="w-3 h-3 text-cyan-400" />
-                      <span className="capitalize">{emp.latest_location.activity_type || 'Unknown'}</span>
+                  <div className="space-y-2 pt-2 border-t border-slate-800/80">
+                    <div className="grid grid-cols-3 gap-1 text-[11px] text-slate-300">
+                      <div className="flex items-center gap-1" title="Movement Activity">
+                        <Activity className="w-3 h-3 text-cyan-400" />
+                        <span className="capitalize">{emp.latest_location.activity_type || 'Unknown'}</span>
+                      </div>
+                      <div className="flex items-center gap-1" title="Instantaneous Speed">
+                        <Navigation className="w-3 h-3 text-indigo-400" />
+                        <span>Speed: {(emp.latest_location.activity_type === 'still' || emp.latest_location.activity_type === 'shift_ended' || (emp.latest_location.speed || 0) < 2) ? '0' : Math.round(emp.latest_location.speed)} km/h</span>
+                      </div>
+                      <div className="flex items-center gap-1" title="Battery Level">
+                        <Battery className="w-3 h-3 text-emerald-400" />
+                        <span>{emp.latest_location.battery_level ?? '--'}%</span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1">
-                      <Navigation className="w-3 h-3 text-indigo-400" />
-                      <span>{(emp.latest_location.activity_type === 'still' || (emp.latest_location.speed || 0) < 2) ? '0 km/h' : `${Math.round(emp.latest_location.speed)} km/h`}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Battery className="w-3 h-3 text-emerald-400" />
-                      <span>{emp.latest_location.battery_level ?? '--'}%</span>
+
+                    {/* Per-Employee Distance Odometer (Resets Weekly) */}
+                    <div className="bg-slate-900/90 rounded-lg p-2 border border-slate-800/90 flex items-center justify-between text-[11px]">
+                      <div>
+                        <span className="text-slate-400 text-[10px] block font-medium">TODAY'S TRAVEL</span>
+                        <span className="font-bold text-emerald-400">
+                          {emp.today_distance_km ? `${emp.today_distance_km} km` : '0.00 km'}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-slate-400 text-[10px] block font-medium">THIS WEEK (7D)</span>
+                        <span className="font-bold text-cyan-400">
+                          {emp.week_distance_km ? `${emp.week_distance_km} km` : '0.00 km'}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -512,7 +551,15 @@ export default function LiveMap({ liveFeed }) {
                         </div>
                         <div className="flex justify-between">
                           <span className="text-slate-500 font-medium">Speed:</span>
-                          <span className="font-bold text-slate-900">{(emp.latest_location.activity_type === 'still' || (emp.latest_location.speed || 0) < 2) ? 0 : Math.round(emp.latest_location.speed)} km/h</span>
+                          <span className="font-bold text-slate-900">{(emp.latest_location.activity_type === 'still' || emp.latest_location.activity_type === 'shift_ended' || (emp.latest_location.speed || 0) < 2) ? 0 : Math.round(emp.latest_location.speed)} km/h</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500 font-medium">Today's Travel:</span>
+                          <span className="font-bold text-emerald-600">{emp.today_distance_km ? `${emp.today_distance_km} km` : '0.00 km'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500 font-medium">This Week (7D):</span>
+                          <span className="font-bold text-cyan-600">{emp.week_distance_km ? `${emp.week_distance_km} km` : '0.00 km'}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-slate-500 font-medium">GPS Accuracy:</span>
