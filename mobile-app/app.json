@@ -8,7 +8,10 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "UIBackgroundModes": ["location", "fetch"],
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ],
         "NSLocationWhenInUseUsageDescription": "GeoTrack needs your location to track field work during active shifts.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "GeoTrack tracks your location in the background during working hours for automated client visit logging.",
         "NSMotionUsageDescription": "GeoTrack uses motion detection to optimize battery consumption."
@@ -22,7 +25,9 @@
         "ACCESS_BACKGROUND_LOCATION",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION",
-        "ACTIVITY_RECOGNITION"
+        "ACTIVITY_RECOGNITION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ]
     },
     "plugins": [
@@ -32,6 +37,11 @@
           "locationAlwaysAndWhenInUsePermission": "Allow GeoTrack to access your location to track travel and client visits."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "bb641285-188e-4f6f-92fd-0968d6eb168b"
+      }
+    }
   }
 }

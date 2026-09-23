@@ -57,10 +57,12 @@ export default function TrackingScreen({ user, onLogout }) {
       } catch (e) {}
 
       const rawSpeedKmh = coords.speed ? (coords.speed * 3.6) : 0;
-      // Real movement requires both physical accelerometer locomotion AND minimum speed (> 2.5 km/h)
-      const isPhysicallyMoving = activity !== 'still' && rawSpeedKmh > 2.5;
+      // Real movement: either vehicle movement (> 2.5 km/h) OR walking motion
+      const isVehicleMoving = rawSpeedKmh > 2.5;
+      const isWalkingMotion = activity !== 'still' && rawSpeedKmh > 1.2;
+      const isPhysicallyMoving = isVehicleMoving || isWalkingMotion;
       const cleanSpeed = isPhysicallyMoving ? Math.round(rawSpeedKmh) : 0;
-      const cleanActivity = isPhysicallyMoving ? (rawSpeedKmh > 15 ? 'in_vehicle' : 'walking') : 'still';
+      const cleanActivity = isPhysicallyMoving ? (rawSpeedKmh > 12 ? 'in_vehicle' : 'walking') : 'still';
 
       await api.post('/location/ping', {
         latitude: coords.latitude,
@@ -90,13 +92,13 @@ export default function TrackingScreen({ user, onLogout }) {
     }
 
     try {
-      // 1. BATTERY SAVER: Balanced accuracy uses cell/Wi-Fi when still, saving 70% power
-      // 2. Poll every 30 seconds or 35 meters instead of 5 seconds (greatly reduces radio wakeups)
+      // 1. High GPS accuracy captures true satellite coordinates along roads
+      // 2. 12-second / 15-meter interval captures curves, turns, and junctions while traveling
       foregroundWatcher.current = await Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.Balanced,
-          timeInterval: 30000, // Every 30 seconds (optimal for battery)
-          distanceInterval: 35, // Or 35 meters traveled
+          accuracy: Location.Accuracy.High,
+          timeInterval: 12000, // 12 seconds
+          distanceInterval: 15, // 15 meters
         },
         (loc) => {
           sendLocationPing(loc.coords, loc.mocked);
@@ -108,13 +110,13 @@ export default function TrackingScreen({ user, onLogout }) {
         const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
         if (bgStatus === 'granted') {
           await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-            accuracy: Location.Accuracy.Balanced,
-            timeInterval: 45000, // 45 seconds in background
-            distanceInterval: 40,
+            accuracy: Location.Accuracy.High,
+            timeInterval: 15000, // 15 seconds in background
+            distanceInterval: 20, // 20 meters
             foregroundService: {
-              notificationTitle: 'Shift Active',
-              notificationBody: 'Work shift in progress (Battery Saver Active).',
-              notificationColor: '#10b981',
+              notificationTitle: 'GeoTrack Shift Active',
+              notificationBody: 'Tracking active field route & visits.',
+              notificationColor: '#0284c7',
             },
           });
         }

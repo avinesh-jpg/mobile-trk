@@ -2,19 +2,98 @@ import React, { useEffect, useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { api } from '../api';
-import { User, Battery, Activity, AlertTriangle, Navigation, RefreshCw, Send } from 'lucide-react';
+import { User, Battery, Activity, AlertTriangle, Navigation, RefreshCw, Send, Shield, MapPin } from 'lucide-react';
+
+// Distance calculation between two lat/lng pairs
+function getDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Dynamic Status Calculation: Office vs On The Way vs Client vs Stopped vs Offline
+function getEmployeeStatus(emp, geofences = []) {
+  if (!emp.is_online || !emp.latest_location) {
+    return {
+      label: 'Offline',
+      type: 'offline',
+      bgClass: 'bg-slate-800 text-slate-400 border-slate-700',
+      icon: '⚪',
+      description: 'Shift Inactive'
+    };
+  }
+
+  const { latitude, longitude, speed = 0, activity_type = 'still' } = emp.latest_location;
+  const isMoving = (speed >= 2.5) || (activity_type === 'in_vehicle' || activity_type === 'walking');
+
+  // Check if inside any registered geofence
+  for (const gf of geofences) {
+    const dist = getDistanceMeters(latitude, longitude, gf.latitude, gf.longitude);
+    if (dist <= gf.radius_meters) {
+      const isOffice = gf.name.toLowerCase().includes('office') || gf.name.toLowerCase().includes('hq');
+      return {
+        label: isOffice ? 'In Office' : 'At Client Site',
+        subText: gf.name,
+        type: isOffice ? 'office' : 'client',
+        bgClass: isOffice
+          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+          : 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+        icon: isOffice ? '🏢' : '📍',
+        description: gf.name
+      };
+    }
+  }
+
+  // Outside all geofences
+  if (isMoving) {
+    const cleanSpeed = Math.round(speed);
+    return {
+      label: 'On The Way',
+      subText: `${cleanSpeed} km/h`,
+      type: 'on_the_way',
+      bgClass: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 shadow-sm animate-pulse',
+      icon: '🚗',
+      description: `In Transit (${cleanSpeed} km/h)`
+    };
+  } else {
+    return {
+      label: 'Stopped / Parked',
+      subText: 'Stationary',
+      type: 'stopped',
+      bgClass: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+      icon: '🛑',
+      description: 'Stopped outside geofence'
+    };
+  }
+}
 
 // Custom Google-style Navigation Marker with Compass Heading Rotation
-const createAvatarIcon = (name, isOnline, isMock, heading = 0, speed = 0) => {
+const createAvatarIcon = (name, isOnline, isMock, heading = 0, speed = 0, statusType = 'offline') => {
   const initials = name.slice(0, 2).toUpperCase();
-  const bgClass = isMock ? '#ef4444' : (isOnline ? '#0284c7' : '#64748b');
   const isMoving = (speed || 0) > 2;
-  
+
+  let bgClass = '#64748b'; // default offline
+  if (isMock) {
+    bgClass = '#ef4444';
+  } else if (statusType === 'on_the_way') {
+    bgClass = '#0284c7'; // cyan/blue
+  } else if (statusType === 'office') {
+    bgClass = '#10b981'; // emerald green
+  } else if (statusType === 'client') {
+    bgClass = '#8b5cf6'; // purple
+  } else if (isOnline) {
+    bgClass = '#0284c7';
+  }
+
   return L.divIcon({
     className: 'custom-leaflet-marker',
     html: `
       <div style="position: relative; display: flex; align-items: center; justify-content: center;">
-        ${isOnline ? '<div style="position: absolute; width: 48px; height: 48px; border-radius: 9999px; background: rgba(2,132,199,0.3); animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>' : ''}
+        ${isOnline ? `<div style="position: absolute; width: 48px; height: 48px; border-radius: 9999px; background: ${statusType === 'on_the_way' ? 'rgba(56,189,248,0.3)' : 'rgba(16,185,129,0.25)'}; animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>` : ''}
         
         <!-- Rotating Navigation Heading Pointer (Google Maps style) -->
         <div style="transform: rotate(${heading || 0}deg); transition: transform 0.5s ease; position: relative;">
@@ -49,10 +128,11 @@ function ChangeMapView({ center, zoom }) {
 
 export default function LiveMap({ liveFeed }) {
   const [employees, setEmployees] = useState([]);
+  const [geofences, setGeofences] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedUser, setSelectedUser] = useState(null);
   const [simulating, setSimulating] = useState(false);
-  const [mapStyle, setMapStyle] = useState('google-hybrid'); // 'google-hybrid', 'google-streets', 'dark'
+  const [mapStyle, setMapStyle] = useState('google-hybrid');
   const [showTraffic, setShowTraffic] = useState(true);
 
   const fetchEmployees = async () => {
@@ -69,8 +149,18 @@ export default function LiveMap({ liveFeed }) {
     }
   };
 
+  const fetchGeofences = async () => {
+    try {
+      const res = await api.get('/geofence/');
+      setGeofences(res.data);
+    } catch (err) {
+      console.error('Error fetching geofences:', err);
+    }
+  };
+
   useEffect(() => {
     fetchEmployees();
+    fetchGeofences();
     const interval = setInterval(fetchEmployees, 15000);
     return () => clearInterval(interval);
   }, []);
@@ -108,15 +198,15 @@ export default function LiveMap({ liveFeed }) {
   const sendSimulatedPing = async (emp) => {
     setSimulating(true);
     try {
-      const currentLat = emp.latest_location?.latitude || 12.9716;
-      const currentLng = emp.latest_location?.longitude || 77.5946;
+      const currentLat = emp.latest_location?.latitude || 11.1542;
+      const currentLng = emp.latest_location?.longitude || 77.3060;
       const newLat = currentLat + (Math.random() - 0.5) * 0.003;
       const newLng = currentLng + (Math.random() - 0.5) * 0.003;
 
       await api.post('/location/ping', {
         latitude: newLat,
         longitude: newLng,
-        speed: Math.round(20 + Math.random() * 30),
+        speed: Math.round(25 + Math.random() * 25),
         battery_level: Math.round(70 + Math.random() * 20),
         activity_type: 'in_vehicle',
         is_moving: true,
@@ -144,7 +234,7 @@ export default function LiveMap({ liveFeed }) {
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
           <div>
             <h2 className="text-sm font-bold text-white uppercase tracking-wider">Field Personnel</h2>
-            <p className="text-xs text-slate-400">{employees.length} Registered Technicians</p>
+            <p className="text-xs text-slate-400">{employees.length} Field Technicians</p>
           </div>
           <button
             onClick={fetchEmployees}
@@ -160,6 +250,7 @@ export default function LiveMap({ liveFeed }) {
           {employees.map((emp) => {
             const isSelected = selectedUser?.user_id === emp.user_id;
             const hasLocation = !!emp.latest_location;
+            const status = getEmployeeStatus(emp, geofences);
 
             return (
               <div
@@ -174,7 +265,7 @@ export default function LiveMap({ liveFeed }) {
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center space-x-2.5">
                     <div className="relative">
-                      <div className={`w-8 h-8 rounded-full ${emp.is_online ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'} flex items-center justify-center font-bold text-xs`}>
+                      <div className={`w-9 h-9 rounded-full ${emp.is_online ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-400'} flex items-center justify-center font-bold text-xs`}>
                         {emp.name.slice(0, 2).toUpperCase()}
                       </div>
                       <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-slate-900 ${emp.is_online ? 'bg-emerald-400' : 'bg-slate-500'}`} />
@@ -190,6 +281,15 @@ export default function LiveMap({ liveFeed }) {
                       <AlertTriangle className="w-3 h-3" /> FAKE GPS
                     </span>
                   )}
+                </div>
+
+                {/* Dynamic Status Badge (In Office vs On The Way vs Client) */}
+                <div className="mb-2">
+                  <span className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-0.5 rounded-full border ${status.bgClass}`}>
+                    <span>{status.icon}</span>
+                    <span>{status.label}</span>
+                    {status.subText && <span className="opacity-80 font-normal">({status.subText})</span>}
+                  </span>
                 </div>
 
                 {hasLocation ? (
@@ -279,15 +379,15 @@ export default function LiveMap({ liveFeed }) {
             }`}
             title="Real-time road congestion and traffic conditions"
           >
-            🚦 Traffic: {showTraffic ? 'ON' : 'OFF'}
+            🚦 Traffic {showTraffic ? 'ON' : 'OFF'}
           </button>
         </div>
 
         <MapContainer
           center={mapCenter}
-          zoom={15}
-          scrollWheelZoom={true}
+          zoom={14}
           style={{ height: '100%', width: '100%', minHeight: '100%' }}
+          className="w-full h-full"
         >
           {mapStyle === 'google-hybrid' && (
             <TileLayer
@@ -316,11 +416,39 @@ export default function LiveMap({ liveFeed }) {
 
           <ChangeMapView center={mapCenter} />
 
+          {/* Render Geofences (Office & Client Sites) */}
+          {geofences.map((gf) => {
+            const isOffice = gf.name.toLowerCase().includes('office') || gf.name.toLowerCase().includes('hq');
+            const color = isOffice ? '#10b981' : '#8b5cf6';
+            return (
+              <Circle
+                key={gf.id}
+                center={[gf.latitude, gf.longitude]}
+                radius={gf.radius_meters}
+                pathOptions={{
+                  color: color,
+                  fillColor: color,
+                  fillOpacity: 0.18,
+                  weight: 2,
+                  dashArray: '5, 5'
+                }}
+              >
+                <Popup>
+                  <div className="p-1 font-semibold text-xs text-slate-900">
+                    <span className="font-bold">{isOffice ? '🏢' : '📍'} {gf.name}</span>
+                    <div className="text-[11px] text-slate-500 font-normal">Radius: {gf.radius_meters}m</div>
+                  </div>
+                </Popup>
+              </Circle>
+            );
+          })}
+
           {/* Render markers & meter-accuracy radar circles for all active employees */}
           {employees.map((emp) => {
             if (!emp.latest_location) return null;
             const pos = [emp.latest_location.latitude, emp.latest_location.longitude];
             const accuracyMeters = emp.latest_location.accuracy || 15;
+            const status = getEmployeeStatus(emp, geofences);
 
             return (
               <React.Fragment key={emp.user_id}>
@@ -329,8 +457,8 @@ export default function LiveMap({ liveFeed }) {
                   center={pos}
                   radius={accuracyMeters}
                   pathOptions={{
-                    color: '#0284c7',
-                    fillColor: '#38bdf8',
+                    color: status.type === 'office' ? '#10b981' : '#0284c7',
+                    fillColor: status.type === 'office' ? '#34d399' : '#38bdf8',
                     fillOpacity: 0.15,
                     weight: 1.5,
                     dashArray: '4, 4'
@@ -344,16 +472,26 @@ export default function LiveMap({ liveFeed }) {
                     emp.is_online,
                     emp.latest_location.is_mock,
                     emp.latest_location.heading,
-                    emp.latest_location.speed
+                    emp.latest_location.speed,
+                    status.type
                   )}
                 >
                   <Popup>
                     <div className="p-1.5 text-slate-900 min-w-[200px]">
                       <div className="border-b pb-1 mb-2">
-                        <h4 className="font-bold text-sm text-slate-900">{emp.name}</h4>
+                        <div className="flex items-center justify-between">
+                          <h4 className="font-bold text-sm text-slate-900">{emp.name}</h4>
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${status.bgClass}`}>
+                            {status.icon} {status.label}
+                          </span>
+                        </div>
                         <p className="text-[11px] text-slate-500">{emp.email}</p>
                       </div>
                       <div className="text-xs space-y-1.5">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500 font-medium">Status:</span>
+                          <span className="font-bold text-slate-900">{status.description}</span>
+                        </div>
                         <div className="flex justify-between">
                           <span className="text-slate-500 font-medium">Speed:</span>
                           <span className="font-bold text-slate-900">{(emp.latest_location.activity_type === 'still' || (emp.latest_location.speed || 0) < 2) ? 0 : Math.round(emp.latest_location.speed)} km/h</span>
