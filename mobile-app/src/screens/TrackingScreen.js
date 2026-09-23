@@ -92,13 +92,13 @@ export default function TrackingScreen({ user, onLogout }) {
     }
 
     try {
-      // 1. High GPS accuracy captures true satellite coordinates along roads
-      // 2. 12-second / 15-meter interval captures curves, turns, and junctions while traveling
+      // 1. High GPS accuracy captures satellite coordinates
+      // 2. 3-second / 2-meter interval for Rapido/Uber style ultra-fast real-time updates
       foregroundWatcher.current = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.High,
-          timeInterval: 12000, // 12 seconds
-          distanceInterval: 15, // 15 meters
+          timeInterval: 3000, // Every 3 seconds (Rapido/Uber real-time frequency)
+          distanceInterval: 2, // Every 2 meters (detects small movements immediately)
         },
         (loc) => {
           sendLocationPing(loc.coords, loc.mocked);
@@ -111,11 +111,11 @@ export default function TrackingScreen({ user, onLogout }) {
         if (bgStatus === 'granted') {
           await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
             accuracy: Location.Accuracy.High,
-            timeInterval: 15000, // 15 seconds in background
-            distanceInterval: 20, // 20 meters
+            timeInterval: 5000, // Every 5 seconds in background
+            distanceInterval: 5, // Every 5 meters in background
             foregroundService: {
               notificationTitle: 'GeoTrack Shift Active',
-              notificationBody: 'Tracking active field route & visits.',
+              notificationBody: 'Live tracking active (< 3s real-time stream).',
               notificationColor: '#0284c7',
             },
           });

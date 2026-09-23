@@ -34,7 +34,7 @@ export default function App() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.event === 'location_update') {
+          if (data.event === 'location_update' || data.event === 'shift_ended') {
             setLiveFeed(data);
           }
         } catch (e) {

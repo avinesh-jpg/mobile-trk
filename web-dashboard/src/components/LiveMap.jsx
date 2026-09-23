@@ -161,7 +161,7 @@ export default function LiveMap({ liveFeed }) {
   useEffect(() => {
     fetchEmployees();
     fetchGeofences();
-    const interval = setInterval(fetchEmployees, 15000);
+    const interval = setInterval(fetchEmployees, 5000); // Fast 5s fallback poll
     return () => clearInterval(interval);
   }, []);
 
