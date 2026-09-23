@@ -119,6 +119,52 @@ def ingest_batch_locations(
     db.commit()
     return {"message": "Successfully synchronized offline locations", "count": len(new_records)}
 
+@router.post("/stop-shift")
+async def stop_shift_tracking(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Called when employee taps 'End Shift' / 'Stop Tracking' in mobile app.
+    Marks status as shift_ended, drops speed to 0, and notifies dashboard in real-time.
+    """
+    now_utc = datetime.now(timezone.utc)
+    last_loc = (
+        db.query(Location)
+        .filter(Location.user_id == current_user.id)
+        .order_by(desc(Location.recorded_at))
+        .first()
+    )
+    if last_loc:
+        stop_loc = Location(
+            user_id=current_user.id,
+            latitude=last_loc.latitude,
+            longitude=last_loc.longitude,
+            altitude=last_loc.altitude,
+            speed=0.0,
+            heading=last_loc.heading,
+            accuracy=last_loc.accuracy,
+            battery_level=last_loc.battery_level,
+            is_moving=False,
+            activity_type="shift_ended",
+            is_mock=False,
+            recorded_at=now_utc
+        )
+        db.add(stop_loc)
+        db.commit()
+
+    broadcast_data = {
+        "event": "shift_ended",
+        "user_id": current_user.id,
+        "user_name": current_user.name,
+        "is_online": False,
+        "speed": 0.0,
+        "activity_type": "shift_ended",
+        "recorded_at": now_utc.isoformat()
+    }
+    await manager.broadcast(broadcast_data)
+    return {"message": "Shift ended successfully", "status": "offline"}
+
 @router.get("/latest", response_model=List[UserLiveStatus])
 def get_all_latest_locations(
     db: Session = Depends(get_db),
@@ -139,12 +185,21 @@ def get_all_latest_locations(
             .first()
         )
         
-        # Consider online if pinged within last 10 minutes
+        # Consider online only if pinged within last 5 minutes AND not shift_ended
         is_online = False
+        latest_loc_out = None
         if last_loc and last_loc.recorded_at:
             delta = (now_utc - last_loc.recorded_at).total_seconds()
-            if delta <= 600:
+            if delta <= 300 and last_loc.activity_type != "shift_ended":
                 is_online = True
+            
+            # If no updates for > 75 seconds, person is stationary (speed = 0)
+            loc_data = LocationOut.model_validate(last_loc)
+            if delta > 75 and is_online:
+                loc_data.speed = 0.0
+                loc_data.is_moving = False
+                loc_data.activity_type = "still"
+            latest_loc_out = loc_data
 
         results.append(
             UserLiveStatus(
@@ -152,7 +207,7 @@ def get_all_latest_locations(
                 name=emp.name,
                 email=emp.email,
                 role=emp.role,
-                latest_location=LocationOut.model_validate(last_loc) if last_loc else None,
+                latest_location=latest_loc_out,
                 is_online=is_online
             )
         )

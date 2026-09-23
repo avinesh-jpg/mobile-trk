@@ -139,6 +139,14 @@ export default function TrackingScreen({ user, onLogout }) {
         await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
       }
       setIsTracking(false);
+      setActivity('still');
+
+      // Immediately notify cloud backend and web dashboard that shift ended
+      try {
+        await api.post('/location/stop-shift');
+      } catch (e) {
+        console.log('Stop-shift notify postponed (offline):', e.message);
+      }
     } catch (err) {
       console.error('Stop error:', err);
     }

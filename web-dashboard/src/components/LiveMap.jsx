@@ -17,13 +17,13 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
 
 // Dynamic Status Calculation: Office vs On The Way vs Client vs Stopped vs Offline
 function getEmployeeStatus(emp, geofences = []) {
-  if (!emp.is_online || !emp.latest_location) {
+  if (!emp.is_online || !emp.latest_location || emp.latest_location.activity_type === 'shift_ended') {
     return {
-      label: 'Offline',
+      label: 'Shift Ended',
       type: 'offline',
       bgClass: 'bg-slate-800 text-slate-400 border-slate-700',
       icon: '⚪',
-      description: 'Shift Inactive'
+      description: 'Shift Inactive / Stopped'
     };
   }
 
@@ -171,6 +171,24 @@ export default function LiveMap({ liveFeed }) {
     setEmployees((prev) => {
       return prev.map((emp) => {
         if (emp.user_id === liveFeed.user_id) {
+          if (liveFeed.event === 'shift_ended') {
+            const updated = {
+              ...emp,
+              is_online: false,
+              latest_location: emp.latest_location ? {
+                ...emp.latest_location,
+                speed: 0,
+                is_moving: false,
+                activity_type: 'shift_ended',
+                recorded_at: liveFeed.recorded_at,
+              } : null
+            };
+            if (selectedUser?.user_id === emp.user_id) {
+              setSelectedUser(updated);
+            }
+            return updated;
+          }
+
           const updated = {
             ...emp,
             is_online: true,
