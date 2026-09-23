@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
-import { StatusBar } from 'expo-status-bar';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 // Ensure background task is registered at root
 import './src/services/backgroundTask';
@@ -49,14 +49,16 @@ export default function App() {
   }
 
   return (
-    <View style={styles.container}>
-      <StatusBar style="light" />
-      {user ? (
-        <TrackingScreen user={user} onLogout={handleLogout} />
-      ) : (
-        <LoginScreen onLoginSuccess={(userData) => setUser(userData)} />
-      )}
-    </View>
+    <SafeAreaProvider>
+      <View style={styles.container}>
+        <StatusBar style="light" />
+        {user ? (
+          <TrackingScreen user={user} onLogout={handleLogout} />
+        ) : (
+          <LoginScreen onLoginSuccess={(userData) => setUser(userData)} />
+        )}
+      </View>
+    </SafeAreaProvider>
   );
 }
 
