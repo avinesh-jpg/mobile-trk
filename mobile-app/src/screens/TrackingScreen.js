@@ -13,7 +13,10 @@ import { Accelerometer } from 'expo-sensors';
 import { LOCATION_TASK_NAME } from '../config';
 import api from '../services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { syncOfflineLocations } from '../services/offlineStorage';
+
+const isExpoGo = Constants.appOwnership === 'expo' || Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
 
 export default function TrackingScreen({ user, onLogout }) {
   const [isTracking, setIsTracking] = useState(false);
@@ -27,6 +30,12 @@ export default function TrackingScreen({ user, onLogout }) {
         startTracking(true);
       }
     });
+
+    if (!isExpoGo) {
+      Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then((started) => {
+        if (started) setIsTracking(true);
+      }).catch(() => {});
+    }
 
     const sensorSub = Accelerometer.addListener((accelData) => {
       const magnitude = Math.sqrt(
@@ -119,34 +128,36 @@ export default function TrackingScreen({ user, onLogout }) {
       await AsyncStorage.setItem('shift_active', 'true');
       setIsTracking(true);
 
-      // 2. Safe background location check (prevents Android activity recreation crash)
-      try {
-        const bgCheck = await Location.getBackgroundPermissionsAsync();
-        let bgGranted = bgCheck.status === 'granted';
+      // 2. Safe background location check (Only in standalone APK; skipped in Expo Go to avoid sandbox warning)
+      if (!isExpoGo) {
+        try {
+          const bgCheck = await Location.getBackgroundPermissionsAsync();
+          let bgGranted = bgCheck.status === 'granted';
 
-        // Only ask if not already granted and not an auto-resume
-        if (!bgGranted && !isResuming) {
-          const bgReq = await Location.requestBackgroundPermissionsAsync();
-          bgGranted = bgReq.status === 'granted';
-        }
-
-        if (bgGranted) {
-          const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-          if (!alreadyRunning) {
-            await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-              accuracy: Location.Accuracy.High,
-              timeInterval: 5000,
-              distanceInterval: 5,
-              foregroundService: {
-                notificationTitle: 'GeoTrack Shift Active',
-                notificationBody: 'Live tracking active (< 3s real-time stream).',
-                notificationColor: '#0284c7',
-              },
-            });
+          // Only ask if not already granted and not an auto-resume
+          if (!bgGranted && !isResuming) {
+            const bgReq = await Location.requestBackgroundPermissionsAsync();
+            bgGranted = bgReq.status === 'granted';
           }
+
+          if (bgGranted) {
+            const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+            if (!alreadyRunning) {
+              await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+                accuracy: Location.Accuracy.High,
+                timeInterval: 5000,
+                distanceInterval: 5,
+                foregroundService: {
+                  notificationTitle: 'GeoTrack Shift Active',
+                  notificationBody: 'Live tracking active (< 3s real-time stream).',
+                  notificationColor: '#0284c7',
+                },
+              });
+            }
+          }
+        } catch (bgErr) {
+          console.log('Background task fallback to foreground:', bgErr.message);
         }
-      } catch (bgErr) {
-        console.log('Background task fallback to foreground:', bgErr.message);
       }
     } catch (err) {
       console.error('Tracking start error:', err);
@@ -159,12 +170,14 @@ export default function TrackingScreen({ user, onLogout }) {
         foregroundWatcher.current.remove();
         foregroundWatcher.current = null;
       }
-      try {
-        const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-        if (running) {
-          await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
-        }
-      } catch (e) {}
+      if (!isExpoGo) {
+        try {
+          const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+          if (running) {
+            await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+          }
+        } catch (e) {}
+      }
 
       await AsyncStorage.removeItem('shift_active');
       setIsTracking(false);
