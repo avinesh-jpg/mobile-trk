@@ -27,16 +27,16 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Setup Gradle
+      - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.0'
+          gradle-version: '9.3.1'
 
       - name: Generate Wrapper if missing
         working-directory: android-native-app
         run: |
           if [ ! -f "gradlew" ]; then
-            gradle wrapper --gradle-version 9.0
+            gradle wrapper --gradle-version 9.3.1
           fi
           chmod +x gradlew
 
