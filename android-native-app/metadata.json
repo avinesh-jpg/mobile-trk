@@ -1,0 +1,6 @@
+{
+  "name": "GeoTrack",
+  "description": "Field employee GPS tracking, shift management, live fleet telemetry, and enterprise route analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

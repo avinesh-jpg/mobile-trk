@@ -1,0 +1,62 @@
+name: Build Native Android APK
+
+on:
+  push:
+    paths:
+      - 'android-native-app/**'
+      - '.github/workflows/build-native-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.0'
+
+      - name: Generate Wrapper if missing
+        working-directory: android-native-app
+        run: |
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper --gradle-version 9.0
+          fi
+          chmod +x gradlew
+
+      - name: Build Standalone APK
+        working-directory: android-native-app
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeoTrack-Native-Android-APK
+          path: android-native-app/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Release APK on GitHub
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: native-app-v1
+          name: "GeoTrack Native Android APK (Kotlin / Jetpack Compose)"
+          body: "Direct downloadable native Android APK built from the Google AI Studio project. Full background location tracking with foreground service."
+          files: android-native-app/app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

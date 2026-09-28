@@ -28,8 +28,19 @@ yarn-error.log*
 */.expo/
 .claude/
 
+# Android
+.gradle/
+*/.gradle/
+build/
+*/build/
+local.properties
+*.apk
+*.aab
+*.zip
+
 # OS / Editor files
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
