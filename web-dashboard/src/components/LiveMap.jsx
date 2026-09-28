@@ -195,6 +195,8 @@ export default function LiveMap({ liveFeed }) {
             latest_location: {
               latitude: liveFeed.latitude,
               longitude: liveFeed.longitude,
+              heading: liveFeed.heading || 0,
+              accuracy: liveFeed.accuracy || 10,
               speed: liveFeed.speed,
               battery_level: liveFeed.battery_level,
               activity_type: liveFeed.activity_type,

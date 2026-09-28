@@ -43,12 +43,12 @@ def detect_gps_spoofing(
 
     return False
 
-def calculate_real_travel_distance(points: list, min_movement_m: float = 25.0, min_speed_kmh: float = 2.5) -> float:
+def calculate_real_travel_distance(points: list, min_movement_m: float = 15.0, min_speed_kmh: float = 2.0) -> float:
     """
     Filters out indoor GPS jitter/drift and calculates real physical travel distance.
-    - Discards micro-wobbles (< 25m) while sitting at a desk.
-    - Discards points with bad GPS satellite accuracy (> 45m).
-    - Uses sensor motion state (still vs moving).
+    - Discards points with poor GPS satellite accuracy (> 35m).
+    - Discards impossible velocity leaps (> 140 km/h) caused by cell-tower cold-start jumps.
+    - Discards micro-wobbles while stationary.
     """
     if len(points) < 2:
         return 0.0
@@ -57,8 +57,9 @@ def calculate_real_travel_distance(points: list, min_movement_m: float = 25.0, m
     last_valid_point = None
 
     for pt in points:
-        # Ignore points with poor satellite fix
-        if getattr(pt, 'accuracy', None) and pt.accuracy > 45.0:
+        # Ignore points with poor satellite fix (> 35m accuracy)
+        acc = getattr(pt, 'accuracy', None)
+        if acc is not None and acc > 35.0:
             continue
 
         if last_valid_point is None:
@@ -70,11 +71,22 @@ def calculate_real_travel_distance(points: list, min_movement_m: float = 25.0, m
             pt.latitude, pt.longitude
         )
 
+        # Velocity check: Calculate real velocity between consecutive fixes
+        if pt.recorded_at and last_valid_point.recorded_at:
+            time_diff = abs((pt.recorded_at - last_valid_point.recorded_at).total_seconds())
+            if time_diff < 0.5:
+                # Concurrent duplicate ping within 500ms
+                continue
+            calculated_speed_kmh = (dist / max(time_diff, 1.0)) * 3.6
+            # If speed > 140 km/h, it is a GPS teleport / cell-tower jump -> DISCARD!
+            if calculated_speed_kmh > 140.0:
+                continue
+
         speed = getattr(pt, 'speed', 0.0) or 0.0
         activity = getattr(pt, 'activity_type', '') or 'unknown'
         is_still = (activity == 'still') or (speed < min_speed_kmh)
 
-        # Ignore micro-jitter when stationary (< 25m)
+        # Ignore micro-jitter when stationary (< 15m)
         if dist < min_movement_m and is_still:
             continue
 
@@ -84,27 +96,43 @@ def calculate_real_travel_distance(points: list, min_movement_m: float = 25.0, m
 
     return total_meters
 
-def filter_clean_trajectory(points: list, min_movement_m: float = 25.0) -> list:
+def filter_clean_trajectory(points: list, min_movement_m: float = 15.0) -> list:
     """
-    Filters out stationary GPS jitter scribbles for route playback.
-    Only records significant travel movements on the route trail.
+    Filters out stationary GPS jitter and impossible teleports for smooth route playback.
     """
     if len(points) < 2:
         return points
 
-    cleaned = [points[0]]
-    for pt in points[1:]:
+    # First filter out bad accuracy fixes (> 35m)
+    accurate_points = [p for p in points if (getattr(p, 'accuracy', None) is None or p.accuracy <= 35.0)]
+    if len(accurate_points) < 2:
+        accurate_points = points
+
+    cleaned = [accurate_points[0]]
+    for pt in accurate_points[1:]:
         last_pt = cleaned[-1]
         dist = haversine_distance_meters(
             last_pt.latitude, last_pt.longitude,
             pt.latitude, pt.longitude
         )
+
+        # Check for teleport leap
+        if pt.recorded_at and last_pt.recorded_at:
+            time_diff = abs((pt.recorded_at - last_pt.recorded_at).total_seconds())
+            if time_diff < 0.5:
+                continue
+            speed_kmh = (dist / max(time_diff, 1.0)) * 3.6
+            if speed_kmh > 140.0:
+                # Discard teleport leap
+                continue
+
         speed = getattr(pt, 'speed', 0.0) or 0.0
-        if dist >= min_movement_m or speed > 3.0:
+        if dist >= min_movement_m or speed >= 2.0:
             cleaned.append(pt)
 
-    if cleaned[-1] != points[-1]:
-        cleaned.append(points[-1])
+    if cleaned[-1] != accurate_points[-1] and len(accurate_points) > 1:
+        cleaned.append(accurate_points[-1])
 
     return cleaned
+
 

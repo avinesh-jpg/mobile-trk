@@ -1,20 +1,89 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap, CircleMarker } from 'react-leaflet';
 import L from 'leaflet';
 import axios from 'axios';
 import { api } from '../api';
-import { Calendar, User, Navigation, Play, Flag, Clock, Route, CheckCircle } from 'lucide-react';
+import {
+  Calendar, User, Navigation, Play, Pause, RotateCcw,
+  FastForward, Flag, Clock, Route, CheckCircle, Battery, Gauge, Zap
+} from 'lucide-react';
 
 function AutoFitBounds({ positions }) {
   const map = useMap();
   useEffect(() => {
     if (positions && positions.length > 0) {
       const bounds = L.latLngBounds(positions);
-      map.fitBounds(bounds, { padding: [50, 50] });
+      map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
     }
   }, [positions, map]);
   return null;
 }
+
+// Compute compass bearing between two coordinates in degrees
+function calculateBearing(lat1, lon1, lat2, lon2) {
+  const y = Math.sin((lon2 - lon1) * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180);
+  const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
+            Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos((lon2 - lon1) * Math.PI / 180);
+  const brng = Math.atan2(y, x) * 180 / Math.PI;
+  return (brng + 360) % 360;
+}
+
+// Catmull-Rom Spline Curve Smoothing: Converts sharp straight-line jumps into smooth curved roads
+function catmullRomSpline(points, numSegments = 5) {
+  if (!points || points.length < 3) return points || [];
+  const result = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = i > 0 ? points[i - 1] : points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = (i + 2 < points.length) ? points[i + 2] : p2;
+
+    for (let t = 0; t < numSegments; t++) {
+      const u = t / numSegments;
+      const u2 = u * u;
+      const u3 = u2 * u;
+
+      const lat = 0.5 * (
+        (2 * p1[0]) +
+        (-p0[0] + p2[0]) * u +
+        (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * u2 +
+        (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * u3
+      );
+      const lon = 0.5 * (
+        (2 * p1[1]) +
+        (-p0[1] + p2[1]) * u +
+        (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * u2 +
+        (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * u3
+      );
+      result.push([lat, lon]);
+    }
+  }
+  result.push(points[points.length - 1]);
+  return result;
+}
+
+// Animated Replay Vehicle Marker with rotating heading needle
+const createReplayMarkerIcon = (initials, heading = 0, speed = 0) => {
+  return L.divIcon({
+    className: 'custom-replay-marker',
+    html: `
+      <div style="position: relative; display: flex; align-items: center; justify-content: center;">
+        <div style="position: absolute; width: 50px; height: 50px; border-radius: 9999px; background: rgba(6,182,212,0.35); animation: ping 1.2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
+        
+        <!-- Rotating Navigation Heading Arrow (Google Maps Style) -->
+        <div style="transform: rotate(${heading || 0}deg); transition: transform 0.25s linear; position: relative;">
+          <div style="position: absolute; top: -14px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent; border-bottom: 13px solid #38bdf8; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));"></div>
+          <div style="width: 38px; height: 38px; border-radius: 9999px; background: linear-gradient(135deg, #0284c7, #06b6d4); color: #ffffff; font-weight: 800; font-size: 13px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.7); border: 2.5px solid #ffffff;">
+            ${initials}
+          </div>
+        </div>
+      </div>
+    `,
+    iconSize: [50, 50],
+    iconAnchor: [25, 25],
+    popupAnchor: [0, -25],
+  });
+};
 
 export default function RouteHistory() {
   const [employees, setEmployees] = useState([]);
@@ -28,6 +97,12 @@ export default function RouteHistory() {
   const [isSnapping, setIsSnapping] = useState(false);
   const [snappedDistanceMeters, setSnappedDistanceMeters] = useState(null);
 
+  // Route Replay Player State
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [replayIndex, setReplayIndex] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1); // 1x, 2x, 5x, 10x
+  const replayIntervalRef = useRef(null);
+
   useEffect(() => {
     api.get('/auth/employees').then((res) => {
       setEmployees(res.data);
@@ -40,9 +115,25 @@ export default function RouteHistory() {
   const fetchRoute = async () => {
     if (!selectedUser) return;
     setLoading(true);
+    setIsPlaying(false);
+    setReplayIndex(0);
     try {
       const res = await api.get(`/location/history/${selectedUser}?date_str=${date}`);
-      setHistory(res.data);
+      // Clean out cold-start teleport leaps and accuracy > 35m
+      const validPoints = (res.data || []).filter((pt, idx, arr) => {
+        if (pt.accuracy && pt.accuracy > 35) return false;
+        if (idx > 0) {
+          const prev = arr[idx - 1];
+          const dLat = (pt.latitude - prev.latitude) * 111.32;
+          const dLon = (pt.longitude - prev.longitude) * 111.32 * Math.cos(pt.latitude * Math.PI / 180);
+          const distKm = Math.sqrt(dLat * dLat + dLon * dLon);
+          const timeSec = Math.abs((new Date(pt.recorded_at) - new Date(prev.recorded_at)) / 1000);
+          if (timeSec > 0 && (distKm / (timeSec / 3600)) > 140) return false; // discard > 140 km/h leap
+        }
+        return true;
+      });
+
+      setHistory(validPoints);
     } catch (err) {
       console.error('Failed to fetch route history:', err);
     } finally {
@@ -56,7 +147,7 @@ export default function RouteHistory() {
     }
   }, [selectedUser, date]);
 
-  // Turn-by-Turn Road Snapping via OSRM (Google Maps Navigation Style)
+  // Turn-by-Turn Road Snapping + Spline Fallback
   useEffect(() => {
     if (!history || history.length < 2) {
       setSnappedCoords([]);
@@ -64,11 +155,10 @@ export default function RouteHistory() {
       return;
     }
 
-    // Filter significant waypoints (at least 20m apart)
+    // Filter significant waypoints (at least 15m apart)
     const waypoints = [];
     let lastPoint = null;
     for (const pt of history) {
-      if (pt.accuracy && pt.accuracy > 45) continue;
       if (!lastPoint) {
         waypoints.push(pt);
         lastPoint = pt;
@@ -79,7 +169,7 @@ export default function RouteHistory() {
                   Math.cos(lastPoint.latitude * Math.PI / 180) * Math.cos(pt.latitude * Math.PI / 180) *
                   Math.sin(dLon / 2) * Math.sin(dLon / 2);
         const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        if (dist >= 20) {
+        if (dist >= 15) {
           waypoints.push(pt);
           lastPoint = pt;
         }
@@ -91,15 +181,15 @@ export default function RouteHistory() {
     }
 
     if (waypoints.length < 2) {
-      setSnappedCoords([]);
-      setSnappedDistanceMeters(null);
+      const raw = history.map((h) => [h.latitude, h.longitude]);
+      setSnappedCoords(catmullRomSpline(raw, 4));
       return;
     }
 
-    // Limit waypoints to 60 for fast OSRM processing
+    // Limit to 30 points per chunk for OSRM matching
     let sampled = waypoints;
-    if (sampled.length > 60) {
-      const step = Math.ceil(sampled.length / 60);
+    if (sampled.length > 30) {
+      const step = Math.ceil(sampled.length / 30);
       const reduced = [sampled[0]];
       for (let i = step; i < sampled.length - 1; i += step) {
         reduced.push(sampled[i]);
@@ -110,26 +200,59 @@ export default function RouteHistory() {
 
     setIsSnapping(true);
     const coordsParam = sampled.map((p) => `${p.longitude},${p.latitude}`).join(';');
-    const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${coordsParam}?overview=full&geometries=geojson`;
+    const osrmUrl = `https://router.project-osrm.org/match/v1/driving/${coordsParam}?overview=full&geometries=geojson`;
 
-    axios.get(osrmUrl, { timeout: 8000 })
+    axios.get(osrmUrl, { timeout: 6000 })
       .then((res) => {
-        if (res.data?.code === 'Ok' && res.data.routes?.length > 0) {
-          const routeGeo = res.data.routes[0].geometry.coordinates;
-          const latLngs = routeGeo.map(([lon, lat]) => [lat, lon]);
+        if (res.data?.code === 'Ok' && res.data.matchings?.length > 0) {
+          const latLngs = [];
+          let totalDist = 0;
+          for (const m of res.data.matchings) {
+            totalDist += m.distance;
+            for (const [lon, lat] of m.geometry.coordinates) {
+              latLngs.push([lat, lon]);
+            }
+          }
           setSnappedCoords(latLngs);
-          setSnappedDistanceMeters(res.data.routes[0].distance);
+          setSnappedDistanceMeters(totalDist);
+        } else {
+          // Fallback to Catmull-Rom spline curve smoothing
+          const raw = sampled.map((p) => [p.latitude, p.longitude]);
+          setSnappedCoords(catmullRomSpline(raw, 4));
         }
       })
       .catch((err) => {
-        console.warn('OSRM Road Snapping unavailable, using direct polyline:', err.message);
-        setSnappedCoords([]);
-        setSnappedDistanceMeters(null);
+        console.warn('OSRM matching unavailable, applying Catmull-Rom road spline:', err.message);
+        const raw = sampled.map((p) => [p.latitude, p.longitude]);
+        setSnappedCoords(catmullRomSpline(raw, 4));
       })
       .finally(() => {
         setIsSnapping(false);
       });
   }, [history]);
+
+  // Route Replay Playback Timer
+  useEffect(() => {
+    if (!isPlaying) {
+      if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
+      return;
+    }
+
+    const intervalMs = Math.max(100, Math.round(1000 / playbackSpeed));
+    replayIntervalRef.current = setInterval(() => {
+      setReplayIndex((prev) => {
+        if (prev >= history.length - 1) {
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, intervalMs);
+
+    return () => {
+      if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
+    };
+  }, [isPlaying, playbackSpeed, history.length]);
 
   const handleClearHistory = async () => {
     if (!selectedUser) return;
@@ -139,19 +262,21 @@ export default function RouteHistory() {
         setHistory([]);
         setSnappedCoords([]);
         setSnappedDistanceMeters(null);
+        setReplayIndex(0);
+        setIsPlaying(false);
       } catch (err) {
         console.error("Clear error:", err);
       }
     }
   };
 
-  // Raw straight-line calculation
+  // Accurate Physical Travel Distance (Matches backend logic)
   let rawMeters = 0;
   if (history.length > 1) {
     let lastValid = history[0];
     for (let i = 1; i < history.length; i++) {
       const curr = history[i];
-      if (curr.accuracy && curr.accuracy > 45) continue;
+      if (curr.accuracy && curr.accuracy > 35) continue;
       const R = 6371000;
       const dLat = (curr.latitude - lastValid.latitude) * Math.PI / 180;
       const dLon = (curr.longitude - lastValid.longitude) * Math.PI / 180;
@@ -160,17 +285,19 @@ export default function RouteHistory() {
                 Math.sin(dLon / 2) * Math.sin(dLon / 2);
       const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
-      const speed = curr.speed || 0;
-      const isStill = (curr.activity_type === 'still') || (speed < 2.5);
+      // Velocity leap check
+      const timeDiff = Math.abs((new Date(curr.recorded_at) - new Date(lastValid.recorded_at)) / 1000);
+      if (timeDiff > 0 && (dist / timeDiff) * 3.6 > 140) continue;
 
-      if (dist < 25 && isStill) continue;
+      const speed = curr.speed || 0;
+      const isStill = (curr.activity_type === 'still') || (speed < 2.0);
+      if (dist < 15 && isStill) continue;
 
       rawMeters += dist;
       lastValid = curr;
     }
   }
 
-  // Choose snapped road distance if available, otherwise raw
   const activeMeters = (snapToRoads && snappedDistanceMeters) ? snappedDistanceMeters : rawMeters;
   const displayDistance = activeMeters >= 1000
     ? `${(activeMeters / 1000).toFixed(2)} km (${Math.round(activeMeters)} m)`
@@ -180,6 +307,28 @@ export default function RouteHistory() {
   const activePolyline = (snapToRoads && snappedCoords.length > 0) ? snappedCoords : rawPolylineCoords;
   const startPoint = rawPolylineCoords[0];
   const endPoint = rawPolylineCoords[rawPolylineCoords.length - 1];
+
+  // Replay Current Point
+  const currentReplayPoint = history[replayIndex] || null;
+  const currentReplayCoord = currentReplayPoint ? [currentReplayPoint.latitude, currentReplayPoint.longitude] : null;
+
+  // Compute heading dynamically for replay marker
+  let currentReplayHeading = currentReplayPoint?.heading || 0;
+  if (!currentReplayHeading && replayIndex < history.length - 1) {
+    const nextPoint = history[replayIndex + 1];
+    currentReplayHeading = calculateBearing(
+      currentReplayPoint.latitude, currentReplayPoint.longitude,
+      nextPoint.latitude, nextPoint.longitude
+    );
+  }
+
+  // Traveled portion of the path for replay highlighting
+  const replayFraction = history.length > 1 ? replayIndex / (history.length - 1) : 0;
+  const traveledPolylineCutoff = Math.max(1, Math.round(activePolyline.length * replayFraction));
+  const traveledPolyline = activePolyline.slice(0, traveledPolylineCutoff);
+
+  const selectedEmpObj = employees.find((e) => String(e.id) === String(selectedUser));
+  const initials = selectedEmpObj ? selectedEmpObj.name.slice(0, 2).toUpperCase() : 'TR';
 
   return (
     <div className="flex-1 flex flex-col h-[calc(100vh-4rem)] overflow-hidden">
@@ -207,7 +356,8 @@ export default function RouteHistory() {
               value={date}
               onChange={(e) => setDate(e.target.value)}
               className="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500"
-            />
+            >
+            </input>
           </div>
 
           <div className="flex items-center gap-2 mt-4">
@@ -219,7 +369,7 @@ export default function RouteHistory() {
               {loading ? 'Loading...' : 'Fetch Route'}
             </button>
 
-            {/* Road Snapping Toggle */}
+            {/* Road Curve / Snap Toggle */}
             <button
               onClick={() => setSnapToRoads(!snapToRoads)}
               className={`px-3 py-2 text-xs font-semibold rounded-lg border transition cursor-pointer flex items-center gap-1.5 ${
@@ -230,7 +380,7 @@ export default function RouteHistory() {
               title="Snap GPS trail onto actual roads like Google Maps navigation"
             >
               <Route className="w-3.5 h-3.5" />
-              <span>{snapToRoads ? '🛣️ Snap to Roads (ON)' : '📍 Direct Points'}</span>
+              <span>{snapToRoads ? '🛣️ Smooth Road Line (ON)' : '📍 Direct Points'}</span>
             </button>
 
             <button
@@ -246,13 +396,13 @@ export default function RouteHistory() {
         {/* Route Stats Summary */}
         <div className="flex flex-wrap items-center gap-6 text-xs text-slate-300">
           <div>
-            <span className="text-slate-400">Total Waypoints:</span>
+            <span className="text-slate-400">Recorded Pings:</span>
             <span className="ml-1.5 font-bold text-white">{history.length}</span>
           </div>
           <div>
-            <span className="text-slate-400">Travel Distance:</span>
+            <span className="text-slate-400">Total Travel:</span>
             <span className="ml-1.5 font-bold text-emerald-400">
-              {displayDistance} {snapToRoads && snappedDistanceMeters ? '(Road-Matched)' : ''}
+              {displayDistance}
             </span>
           </div>
           {history.length > 0 && (
@@ -280,7 +430,7 @@ export default function RouteHistory() {
                 : 'text-slate-400 hover:text-white hover:bg-slate-800'
             }`}
           >
-            🛰️ Google Satellite + Names
+            🛰️ Google Satellite
           </button>
           <button
             onClick={() => setMapStyle('google-streets')}
@@ -304,16 +454,50 @@ export default function RouteHistory() {
           </button>
         </div>
 
-        {isSnapping && (
-          <div className="absolute top-4 left-4 z-[999] bg-slate-900/90 border border-cyan-500/40 text-cyan-300 text-xs px-3 py-1.5 rounded-lg shadow-lg flex items-center gap-2">
-            <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-ping" />
-            <span>Snapping path onto road network...</span>
+        {/* Live Replay HUD Overlay */}
+        {currentReplayPoint && history.length > 1 && (
+          <div className="absolute top-4 left-4 z-[999] bg-slate-900/90 backdrop-blur-md border border-cyan-500/40 rounded-xl p-3 shadow-2xl min-w-[220px] text-xs">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
+              <span className="font-bold text-white flex items-center gap-1.5">
+                <Navigation className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Replay Telemetry</span>
+              </span>
+              <span className="text-[10px] bg-cyan-500/20 text-cyan-300 font-mono px-1.5 py-0.5 rounded">
+                #{replayIndex + 1}/{history.length}
+              </span>
+            </div>
+            <div className="space-y-1.5 text-slate-300">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Timestamp:</span>
+                <span className="font-bold text-white">
+                  {new Date(currentReplayPoint.recorded_at).toLocaleTimeString()}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Current Speed:</span>
+                <span className="font-bold text-emerald-400">
+                  {Math.round(currentReplayPoint.speed || 0)} km/h
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Activity:</span>
+                <span className="font-bold capitalize text-cyan-400">
+                  {currentReplayPoint.activity_type || 'moving'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Battery:</span>
+                <span className="font-bold text-slate-200">
+                  {currentReplayPoint.battery_level ? `${currentReplayPoint.battery_level}%` : '--'}
+                </span>
+              </div>
+            </div>
           </div>
         )}
 
         <MapContainer
           center={[11.1542, 77.3060]}
-          zoom={13}
+          zoom={14}
           style={{ height: '100%', width: '100%', minHeight: '100%' }}
           className="w-full h-full"
         >
@@ -346,28 +530,30 @@ export default function RouteHistory() {
             <>
               <AutoFitBounds positions={activePolyline} />
               
-              {/* Google Navigation Glowing Road Underlay */}
+              {/* Full Background Road Trail (Dark Blue Road Base) */}
               <Polyline
                 positions={activePolyline}
-                pathOptions={{ color: '#0284c7', weight: 8, opacity: 0.35 }}
+                pathOptions={{ color: '#0369a1', weight: 6, opacity: 0.45 }}
               />
 
-              {/* Main Crisp Road Trail */}
-              <Polyline
-                positions={activePolyline}
-                pathOptions={{ color: '#06b6d4', weight: 4.5, opacity: 0.95 }}
-              />
+              {/* Traveled Route Glow (Bright Cyan Traveled Trail) */}
+              {traveledPolyline.length > 0 && (
+                <Polyline
+                  positions={traveledPolyline}
+                  pathOptions={{ color: '#06b6d4', weight: 5, opacity: 0.95 }}
+                />
+              )}
 
-              {/* Breadcrumb dots representing actual recorded GPS pings */}
+              {/* Actual GPS Breadcrumbs (Small Dots) */}
               {rawPolylineCoords.map((coord, idx) => (
                 <CircleMarker
                   key={idx}
                   center={coord}
-                  radius={3}
+                  radius={idx <= replayIndex ? 3.5 : 2.5}
                   pathOptions={{
-                    color: '#38bdf8',
-                    fillColor: '#0369a1',
-                    fillOpacity: 0.9,
+                    color: idx <= replayIndex ? '#38bdf8' : '#64748b',
+                    fillColor: idx <= replayIndex ? '#0284c7' : '#334155',
+                    fillOpacity: 0.85,
                     weight: 1
                   }}
                 />
@@ -389,7 +575,29 @@ export default function RouteHistory() {
                 <Marker position={endPoint}>
                   <Popup>
                     <div className="p-1 text-slate-900 font-semibold text-xs">
-                      🎯 Latest Point: {new Date(history[history.length - 1].recorded_at).toLocaleTimeString()}
+                      🎯 Final Point: {new Date(history[history.length - 1].recorded_at).toLocaleTimeString()}
+                    </div>
+                  </Popup>
+                </Marker>
+              )}
+
+              {/* Dynamic Animated Route Replay Marker */}
+              {currentReplayCoord && (
+                <Marker
+                  position={currentReplayCoord}
+                  icon={createReplayMarkerIcon(
+                    initials,
+                    currentReplayHeading,
+                    currentReplayPoint?.speed || 0
+                  )}
+                  zIndexOffset={1000}
+                >
+                  <Popup>
+                    <div className="p-1 text-slate-900 font-semibold text-xs">
+                      🚗 {selectedEmpObj?.name || 'Technician'} at {new Date(currentReplayPoint.recorded_at).toLocaleTimeString()}
+                      <div className="text-[11px] text-slate-600 font-normal">
+                        Speed: {Math.round(currentReplayPoint.speed || 0)} km/h
+                      </div>
                     </div>
                   </Popup>
                 </Marker>
@@ -397,6 +605,98 @@ export default function RouteHistory() {
             </>
           )}
         </MapContainer>
+
+        {/* Bottom Floating Route Replay Player Bar */}
+        {history.length > 1 && (
+          <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-[999] w-[92%] max-w-3xl bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 rounded-2xl p-4 shadow-2xl flex flex-col gap-3">
+            
+            {/* Timeline Scrubber */}
+            <div className="flex items-center gap-3">
+              <span className="text-[11px] font-mono text-cyan-400 font-bold min-w-[55px]">
+                {history[0] ? new Date(history[0].recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+              </span>
+
+              <input
+                type="range"
+                min={0}
+                max={history.length - 1}
+                value={replayIndex}
+                onChange={(e) => {
+                  setReplayIndex(Number(e.target.value));
+                  setIsPlaying(false);
+                }}
+                className="flex-1 h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+              />
+
+              <span className="text-[11px] font-mono text-cyan-400 font-bold min-w-[55px] text-right">
+                {history[history.length - 1] ? new Date(history[history.length - 1].recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+              </span>
+            </div>
+
+            {/* Playback Controls */}
+            <div className="flex items-center justify-between">
+              
+              <div className="flex items-center gap-2">
+                {/* Reset / Beginning */}
+                <button
+                  onClick={() => {
+                    setReplayIndex(0);
+                    setIsPlaying(false);
+                  }}
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer"
+                  title="Restart from beginning"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+
+                {/* Play / Pause Toggle */}
+                <button
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-bold text-xs shadow-lg flex items-center gap-2 cursor-pointer transition"
+                >
+                  {isPlaying ? (
+                    <>
+                      <Pause className="w-4 h-4 fill-white" />
+                      <span>Pause</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 fill-white" />
+                      <span>Play Replay</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Progress Timestamp */}
+              <div className="text-center">
+                <span className="text-xs text-slate-400">Current Position: </span>
+                <span className="text-xs font-bold text-white">
+                  {currentReplayPoint ? new Date(currentReplayPoint.recorded_at).toLocaleTimeString() : '--:--'}
+                </span>
+              </div>
+
+              {/* Speed Multiplier Buttons */}
+              <div className="flex items-center gap-1 bg-slate-800/80 p-1 rounded-lg border border-slate-700/60">
+                {[1, 2, 5, 10].map((spd) => (
+                  <button
+                    key={spd}
+                    onClick={() => setPlaybackSpeed(spd)}
+                    className={`px-2.5 py-1 text-xs font-bold rounded-md transition cursor-pointer ${
+                      playbackSpeed === spd
+                        ? 'bg-cyan-500 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+                    }`}
+                  >
+                    {spd}x
+                  </button>
+                ))}
+              </div>
+
+            </div>
+
+          </div>
+        )}
 
         {history.length === 0 && !loading && (
           <div className="absolute top-8 left-1/2 -translate-x-1/2 bg-slate-900/90 border border-slate-800 text-slate-400 text-xs px-4 py-2 rounded-xl shadow-xl backdrop-blur z-20">

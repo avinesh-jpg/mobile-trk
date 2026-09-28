@@ -75,6 +75,8 @@ async def ingest_location_ping(
         "user_name": current_user.name,
         "latitude": db_loc.latitude,
         "longitude": db_loc.longitude,
+        "heading": db_loc.heading or 0.0,
+        "accuracy": db_loc.accuracy or 10.0,
         "speed": db_loc.speed,
         "battery_level": db_loc.battery_level,
         "activity_type": db_loc.activity_type,
@@ -201,8 +203,12 @@ def get_all_latest_locations(
                 loc_data.activity_type = "still"
             latest_loc_out = loc_data
 
-        # Calculate employee's distance today (resets daily at 00:00 UTC)
-        start_of_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Calculate employee's distance today in IST (resets daily at 00:00 IST)
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(ist_tz)
+        start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_today = start_of_today_ist.astimezone(timezone.utc)
+
         today_points = (
             db.query(Location)
             .filter(Location.user_id == emp.id, Location.recorded_at >= start_of_today)
@@ -211,8 +217,10 @@ def get_all_latest_locations(
         )
         today_meters = calculate_real_travel_distance(today_points)
 
-        # Calculate employee's distance for current week (resets every Monday 00:00 UTC)
-        start_of_week = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        # Calculate employee's distance for current week (resets every Monday 00:00 IST)
+        start_of_week_ist = (now_ist - timedelta(days=now_ist.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_week = start_of_week_ist.astimezone(timezone.utc)
+
         week_points = (
             db.query(Location)
             .filter(Location.user_id == emp.id, Location.recorded_at >= start_of_week)
@@ -261,14 +269,16 @@ def get_location_history(
     query = db.query(Location).filter(Location.user_id == user_id)
     if date_str:
         try:
-            start_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            end_date = start_date + timedelta(days=1)
-            query = query.filter(Location.recorded_at >= start_date, Location.recorded_at < end_date)
+            ist_tz = timezone(timedelta(hours=5, minutes=30))
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            start_date_ist = dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=ist_tz)
+            end_date_ist = start_date_ist + timedelta(days=1)
+            query = query.filter(Location.recorded_at >= start_date_ist, Location.recorded_at < end_date_ist)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
     
     locations = query.order_by(Location.recorded_at.asc()).limit(3000).all()
-    cleaned = filter_clean_trajectory(locations, min_movement_m=20.0)
+    cleaned = filter_clean_trajectory(locations, min_movement_m=15.0)
     return cleaned
 
 @router.delete("/clear/{user_id}")

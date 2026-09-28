@@ -1,7 +1,8 @@
 import axios from 'axios';
 
-export const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000/api/v1';
-export const WS_BASE = import.meta.env.VITE_WS_BASE || 'ws://127.0.0.1:8000/ws/live';
+export const API_BASE = import.meta.env.VITE_API_BASE || 'https://geotrack-backend-e812.onrender.com/api/v1';
+export const WS_BASE = import.meta.env.VITE_WS_BASE || 'wss://geotrack-backend-e812.onrender.com/ws/live';
+
 
 export const api = axios.create({
   baseURL: API_BASE,
