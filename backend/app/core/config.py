@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30  # 30 days
     GEMINI_API_KEY: Optional[str] = None
+    # Map matching server. Public demo server is free but best-effort and driving-only;
+    # point this at your own OSRM/Valhalla-compatible server for production.
+    OSRM_BASE_URL: str = "https://router.project-osrm.org"
 
     class Config:
         env_file = ".env"

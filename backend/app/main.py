@@ -2,6 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api import auth, location, geofence, analytics, websocket
+from app.db.session import engine, Base
+from app.db import models  # noqa: F401  (registers tables with Base.metadata)
+
+# Create any missing tables (including route_cache) on startup
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

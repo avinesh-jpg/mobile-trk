@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap, CircleMarker } from 'react-leaflet';
 import L from 'leaflet';
-import axios from 'axios';
 import { api } from '../api';
 import {
   Calendar, User, Navigation, Play, Pause, RotateCcw,
@@ -28,38 +27,21 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
   return (brng + 360) % 360;
 }
 
-// Catmull-Rom Spline Curve Smoothing: Converts sharp straight-line jumps into smooth curved roads
-function catmullRomSpline(points, numSegments = 5) {
-  if (!points || points.length < 3) return points || [];
-  const result = [];
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = i > 0 ? points[i - 1] : points[i];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = (i + 2 < points.length) ? points[i + 2] : p2;
-
-    for (let t = 0; t < numSegments; t++) {
-      const u = t / numSegments;
-      const u2 = u * u;
-      const u3 = u2 * u;
-
-      const lat = 0.5 * (
-        (2 * p1[0]) +
-        (-p0[0] + p2[0]) * u +
-        (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * u2 +
-        (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * u3
-      );
-      const lon = 0.5 * (
-        (2 * p1[1]) +
-        (-p0[1] + p2[1]) * u +
-        (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * u2 +
-        (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * u3
-      );
-      result.push([lat, lon]);
+// Take the first `count` points of a list of segments (used to highlight the traveled part of the route)
+function sliceSegments(segments, count) {
+  const out = [];
+  let remaining = count;
+  for (const seg of segments) {
+    if (remaining <= 0) break;
+    if (seg.length <= remaining) {
+      out.push(seg);
+      remaining -= seg.length;
+    } else {
+      out.push(seg.slice(0, remaining));
+      remaining = 0;
     }
   }
-  result.push(points[points.length - 1]);
-  return result;
+  return out;
 }
 
 // Animated Replay Vehicle Marker with rotating heading needle
@@ -93,9 +75,12 @@ export default function RouteHistory() {
   const [loading, setLoading] = useState(false);
   const [mapStyle, setMapStyle] = useState('google-hybrid');
   const [snapToRoads, setSnapToRoads] = useState(true);
-  const [snappedCoords, setSnappedCoords] = useState([]);
+  const [snappedSegments, setSnappedSegments] = useState([]);   // road-following pieces from the backend
+  const [snappedCoords, setSnappedCoords] = useState([]);         // same points, flattened
   const [isSnapping, setIsSnapping] = useState(false);
   const [snappedDistanceMeters, setSnappedDistanceMeters] = useState(null);
+  const [snapFailed, setSnapFailed] = useState(false);            // true if some/all of the route could not be matched to roads
+  const [profile, setProfile] = useState('driving');              // driving | walking | cycling
 
   // Route Replay Player State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -147,89 +132,45 @@ export default function RouteHistory() {
     }
   }, [selectedUser, date]);
 
-  // Turn-by-Turn Road Snapping + Spline Fallback
+  // Road snapping is done by the backend (chunked map matching + cache).
+  // If it fails we show the raw GPS points instead of inventing a smooth curve.
   useEffect(() => {
-    if (!history || history.length < 2) {
+    if (!selectedUser || !history || history.length < 2) {
+      setSnappedSegments([]);
       setSnappedCoords([]);
       setSnappedDistanceMeters(null);
+      setSnapFailed(false);
       return;
     }
 
-    // Filter significant waypoints (at least 15m apart)
-    const waypoints = [];
-    let lastPoint = null;
-    for (const pt of history) {
-      if (!lastPoint) {
-        waypoints.push(pt);
-        lastPoint = pt;
-      } else {
-        const dLat = (pt.latitude - lastPoint.latitude) * Math.PI / 180;
-        const dLon = (pt.longitude - lastPoint.longitude) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                  Math.cos(lastPoint.latitude * Math.PI / 180) * Math.cos(pt.latitude * Math.PI / 180) *
-                  Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        if (dist >= 15) {
-          waypoints.push(pt);
-          lastPoint = pt;
-        }
-      }
-    }
-
-    if (history.length > 0 && waypoints[waypoints.length - 1] !== history[history.length - 1]) {
-      waypoints.push(history[history.length - 1]);
-    }
-
-    if (waypoints.length < 2) {
-      const raw = history.map((h) => [h.latitude, h.longitude]);
-      setSnappedCoords(catmullRomSpline(raw, 4));
-      return;
-    }
-
-    // Limit to 30 points per chunk for OSRM matching
-    let sampled = waypoints;
-    if (sampled.length > 30) {
-      const step = Math.ceil(sampled.length / 30);
-      const reduced = [sampled[0]];
-      for (let i = step; i < sampled.length - 1; i += step) {
-        reduced.push(sampled[i]);
-      }
-      reduced.push(sampled[sampled.length - 1]);
-      sampled = reduced;
-    }
-
+    let cancelled = false;
     setIsSnapping(true);
-    const coordsParam = sampled.map((p) => `${p.longitude},${p.latitude}`).join(';');
-    const osrmUrl = `https://router.project-osrm.org/match/v1/driving/${coordsParam}?overview=full&geometries=geojson`;
-
-    axios.get(osrmUrl, { timeout: 6000 })
+    api
+      .get(`/location/route/${selectedUser}`, { params: { date_str: date, profile } })
       .then((res) => {
-        if (res.data?.code === 'Ok' && res.data.matchings?.length > 0) {
-          const latLngs = [];
-          let totalDist = 0;
-          for (const m of res.data.matchings) {
-            totalDist += m.distance;
-            for (const [lon, lat] of m.geometry.coordinates) {
-              latLngs.push([lat, lon]);
-            }
-          }
-          setSnappedCoords(latLngs);
-          setSnappedDistanceMeters(totalDist);
-        } else {
-          // Fallback to Catmull-Rom spline curve smoothing
-          const raw = sampled.map((p) => [p.latitude, p.longitude]);
-          setSnappedCoords(catmullRomSpline(raw, 4));
-        }
+        if (cancelled) return;
+        const data = res.data || {};
+        setSnappedSegments(data.segments || []);
+        setSnappedCoords(data.coordinates || []);
+        setSnappedDistanceMeters(data.snapped ? data.distance_m : null);
+        setSnapFailed(!data.snapped);
       })
       .catch((err) => {
-        console.warn('OSRM matching unavailable, applying Catmull-Rom road spline:', err.message);
-        const raw = sampled.map((p) => [p.latitude, p.longitude]);
-        setSnappedCoords(catmullRomSpline(raw, 4));
+        if (cancelled) return;
+        console.warn('Road snapping failed, showing raw GPS points:', err.message);
+        setSnappedSegments([]);
+        setSnappedCoords([]);
+        setSnappedDistanceMeters(null);
+        setSnapFailed(true);
       })
       .finally(() => {
-        setIsSnapping(false);
+        if (!cancelled) setIsSnapping(false);
       });
-  }, [history]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [history, selectedUser, date, profile]);
 
   // Route Replay Playback Timer
   useEffect(() => {
@@ -260,8 +201,10 @@ export default function RouteHistory() {
       try {
         await api.delete(`/location/clear/${selectedUser}`);
         setHistory([]);
+        setSnappedSegments([]);
         setSnappedCoords([]);
         setSnappedDistanceMeters(null);
+        setSnapFailed(false);
         setReplayIndex(0);
         setIsPlaying(false);
       } catch (err) {
@@ -304,7 +247,9 @@ export default function RouteHistory() {
     : `${Math.round(activeMeters)} meters`;
 
   const rawPolylineCoords = history.map((h) => [h.latitude, h.longitude]);
-  const activePolyline = (snapToRoads && snappedCoords.length > 0) ? snappedCoords : rawPolylineCoords;
+  const useSnapped = snapToRoads && snappedCoords.length > 0;
+  const activePolyline = useSnapped ? snappedCoords : rawPolylineCoords;
+  const activeSegments = useSnapped ? snappedSegments : [rawPolylineCoords];
   const startPoint = rawPolylineCoords[0];
   const endPoint = rawPolylineCoords[rawPolylineCoords.length - 1];
 
@@ -325,7 +270,7 @@ export default function RouteHistory() {
   // Traveled portion of the path for replay highlighting
   const replayFraction = history.length > 1 ? replayIndex / (history.length - 1) : 0;
   const traveledPolylineCutoff = Math.max(1, Math.round(activePolyline.length * replayFraction));
-  const traveledPolyline = activePolyline.slice(0, traveledPolylineCutoff);
+  const traveledSegments = sliceSegments(activeSegments, traveledPolylineCutoff);
 
   const selectedEmpObj = employees.find((e) => String(e.id) === String(selectedUser));
   const initials = selectedEmpObj ? selectedEmpObj.name.slice(0, 2).toUpperCase() : 'TR';
@@ -380,8 +325,19 @@ export default function RouteHistory() {
               title="Snap GPS trail onto actual roads like Google Maps navigation"
             >
               <Route className="w-3.5 h-3.5" />
-              <span>{snapToRoads ? '🛣️ Smooth Road Line (ON)' : '📍 Direct Points'}</span>
+              <span>{snapToRoads ? (isSnapping ? '🛣️ Snapping to roads…' : '🛣️ Snap to Roads (ON)') : '📍 Direct Points'}</span>
             </button>
+
+            <select
+              value={profile}
+              onChange={(e) => setProfile(e.target.value)}
+              className="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-cyan-500"
+              title="Travel mode used for road matching"
+            >
+              <option value="driving">🚗 Driving</option>
+              <option value="walking">🚶 Walking</option>
+              <option value="cycling">🚲 Cycling</option>
+            </select>
 
             <button
               onClick={handleClearHistory}
@@ -419,6 +375,12 @@ export default function RouteHistory() {
 
       {/* Map View */}
       <div className="flex-1 relative">
+
+        {snapToRoads && snapFailed && !isSnapping && history.length > 1 && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-[999] bg-amber-950/90 border border-amber-700 text-amber-200 text-xs font-semibold rounded-lg px-4 py-2 shadow-2xl">
+            ⚠️ Couldn&apos;t match all of this route to roads — showing raw GPS points for the unmatched parts. Try again in a moment.
+          </div>
+        )}
         
         {/* Floating Map Style Selector */}
         <div className="absolute top-4 right-4 z-[999] bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-xl p-1 shadow-2xl flex items-center gap-1">
@@ -532,14 +494,14 @@ export default function RouteHistory() {
               
               {/* Full Background Road Trail (Dark Blue Road Base) */}
               <Polyline
-                positions={activePolyline}
+                positions={activeSegments}
                 pathOptions={{ color: '#0369a1', weight: 6, opacity: 0.45 }}
               />
 
               {/* Traveled Route Glow (Bright Cyan Traveled Trail) */}
-              {traveledPolyline.length > 0 && (
+              {traveledSegments.length > 0 && (
                 <Polyline
-                  positions={traveledPolyline}
+                  positions={traveledSegments}
                   pathOptions={{ color: '#06b6d4', weight: 5, opacity: 0.95 }}
                 />
               )}

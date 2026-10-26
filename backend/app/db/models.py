@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, BigInteger, String, Boolean, Float, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, Float, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.session import Base
@@ -66,3 +66,17 @@ class DetectedVisit(Base):
 
     user = relationship("User", back_populates="visits")
     geofence = relationship("Geofence", back_populates="visits")
+
+
+class RouteCache(Base):
+    """Road-snapped route for one employee on one (past) day, so it is only matched once."""
+    __tablename__ = "route_cache"
+    __table_args__ = (UniqueConstraint("user_id", "day", "profile", name="uq_route_cache_user_day_profile"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    day = Column(String(10), nullable=False, index=True)  # "YYYY-MM-DD" (IST)
+    profile = Column(String(10), nullable=False, default="driving")
+    geometry = Column(Text, nullable=False)  # JSON: list of segments, each a list of [lat, lng]
+    distance_m = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

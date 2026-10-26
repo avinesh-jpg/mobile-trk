@@ -1,3 +1,4 @@
+import json
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -5,9 +6,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.api.deps import get_db, get_current_user, require_admin
 from app.api.websocket import manager
-from app.db.models import User, Location
+from app.db.models import User, Location, RouteCache
 from app.schemas.location import LocationPing, LocationBatch, LocationOut, UserLiveStatus
 from app.ml.anomaly import detect_gps_spoofing, filter_clean_trajectory, calculate_real_travel_distance
+from app.services.routing import snap_trail, VALID_PROFILES
 
 router = APIRouter(prefix="/location", tags=["Location & Telemetry"])
 
@@ -291,3 +293,80 @@ def clear_user_locations(
     count = db.query(Location).filter(Location.user_id == user_id).delete()
     db.commit()
     return {"message": f"Successfully cleared {count} test telemetry records."}
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+@router.get("/route/{user_id}")
+def get_snapped_route(
+    user_id: int,
+    date_str: str = Query(..., description="Format: YYYY-MM-DD (IST day)"),
+    profile: str = Query("driving", description="driving | walking | cycling"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """
+    Admin endpoint: the employee's trail for a day, snapped onto real roads.
+
+    Past days are cached after a fully successful match. Today is never cached
+    because new points keep arriving. If some chunks cannot be matched, those
+    parts come back as raw GPS and `snapped` is false.
+    """
+    if profile not in VALID_PROFILES:
+        raise HTTPException(status_code=400, detail=f"profile must be one of {sorted(VALID_PROFILES)}")
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    today_ist = datetime.now(IST).strftime("%Y-%m-%d")
+    is_past_day = date_str < today_ist
+
+    if is_past_day:
+        cached = (
+            db.query(RouteCache)
+            .filter(RouteCache.user_id == user_id, RouteCache.day == date_str, RouteCache.profile == profile)
+            .first()
+        )
+        if cached:
+            segments = json.loads(cached.geometry)
+            return {
+                "segments": segments,
+                "coordinates": [pt for seg in segments for pt in seg],
+                "distance_m": cached.distance_m or 0.0,
+                "snapped": True,
+                "failed_chunks": 0,
+                "profile": profile,
+                "cached": True,
+            }
+
+    start = day.replace(tzinfo=IST)
+    end = start + timedelta(days=1)
+    rows = (
+        db.query(Location)
+        .filter(Location.user_id == user_id, Location.recorded_at >= start, Location.recorded_at < end)
+        .order_by(Location.recorded_at.asc())
+        .limit(10000)
+        .all()
+    )
+    # Remove bad-accuracy fixes, teleports and standing-still jitter, but keep
+    # slow turns (small threshold) so corners are not cut.
+    cleaned = filter_clean_trajectory(rows, min_movement_m=8.0)
+
+    result = snap_trail(cleaned, profile=profile)
+    result["cached"] = False
+
+    if is_past_day and result["snapped"] and result["segments"]:
+        db.add(RouteCache(
+            user_id=user_id,
+            day=date_str,
+            profile=profile,
+            geometry=json.dumps(result["segments"]),
+            distance_m=result["distance_m"],
+        ))
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()  # another request cached it first; fine
+
+    return result
