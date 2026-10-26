@@ -5,7 +5,7 @@ from app.api import auth, location, geofence, analytics, websocket
 from app.db.session import engine, Base
 from app.db import models  # noqa: F401  (registers tables with Base.metadata)
 
-# Create any missing tables (including route_cache) on startup
+# Create any missing tables (including route_cache) on startup done
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
