@@ -4,6 +4,7 @@ pydantic>=2.9.2
 pydantic-settings>=2.5.2
 sqlalchemy>=2.0.35
 psycopg2-binary>=2.9.9
+psycopg[binary]>=3.2
 geoalchemy2>=0.15.2
 scikit-learn>=1.5.2
 numpy>=2.1.0
