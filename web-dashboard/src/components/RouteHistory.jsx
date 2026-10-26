@@ -3,9 +3,9 @@ import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap, CircleMarker 
 import L from 'leaflet';
 import { api } from '../api';
 import {
-  Calendar, User, Navigation, Play, Pause, RotateCcw,
-  FastForward, Flag, Clock, Route, CheckCircle, Battery, Gauge, Zap
+  Navigation, Play, Pause, RotateCcw, Clock, Route
 } from 'lucide-react';
+
 
 function AutoFitBounds({ positions }) {
   const map = useMap();
