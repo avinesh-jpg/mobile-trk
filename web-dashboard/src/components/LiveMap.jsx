@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { api } from '../api';
-import { User, Battery, Activity, AlertTriangle, Navigation, RefreshCw, Send, Shield, MapPin } from 'lucide-react';
+import { User, Users, Battery, Activity, AlertTriangle, Navigation, RefreshCw, Send, Shield, MapPin } from 'lucide-react';
 
 // Distance calculation between two lat/lng pairs
 function getDistanceMeters(lat1, lon1, lat2, lon2) {
@@ -126,7 +126,7 @@ function ChangeMapView({ center, zoom }) {
   return null;
 }
 
-export default function LiveMap({ liveFeed }) {
+export default function LiveMap({ liveFeed, onNavigateTab }) {
   const [employees, setEmployees] = useState([]);
   const [geofences, setGeofences] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -288,6 +288,21 @@ export default function LiveMap({ liveFeed }) {
 
         {/* Employee Cards List */}
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
+          {employees.length === 0 && (
+            <div className="p-6 text-center text-slate-400 bg-slate-800/30 rounded-xl border border-slate-800">
+              <Users className="w-8 h-8 mx-auto text-slate-500 mb-2" />
+              <p className="text-sm font-medium text-slate-300">No field drivers registered yet</p>
+              <p className="text-xs text-slate-500 mt-1 mb-3">Add drivers and login credentials for the CM Vechicle app.</p>
+              {onNavigateTab && (
+                <button
+                  onClick={() => onNavigateTab('users')}
+                  className="px-3 py-1.5 bg-gradient-to-r from-cyan-500 to-indigo-600 text-white rounded-lg text-xs font-semibold shadow hover:opacity-95 cursor-pointer"
+                >
+                  + Add Driver
+                </button>
+              )}
+            </div>
+          )}
           {employees.map((emp) => {
             const isSelected = selectedUser?.user_id === emp.user_id;
             const hasLocation = !!emp.latest_location;

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Navigation, Map, History, Sparkles, Shield, LogOut, Radio, FileText } from 'lucide-react';
+import { Navigation, Map, History, Sparkles, Shield, LogOut, Radio, FileText, Users } from 'lucide-react';
 
 export default function Navbar({ activeTab, setActiveTab, user, onLogout, isWsConnected }) {
   return (
@@ -85,6 +85,18 @@ export default function Navbar({ activeTab, setActiveTab, user, onLogout, isWsCo
           >
             <FileText className="w-3.5 h-3.5 text-emerald-400" />
             Timesheet & Reports
+          </button>
+
+          <button
+            onClick={() => setActiveTab('users')}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              activeTab === 'users'
+                ? 'bg-gradient-to-r from-cyan-500 to-indigo-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5 text-cyan-400" />
+            Drivers & Users
           </button>
         </nav>
 

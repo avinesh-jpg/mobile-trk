@@ -66,3 +66,34 @@ def list_employees(
 ):
     """Admin endpoint to list all registered employees."""
     return db.query(User).filter(User.role == "employee").all()
+
+@router.get("/users", response_model=List[UserOut])
+def list_all_users(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """Admin endpoint to list all registered users (Admins & Drivers)."""
+    return db.query(User).order_by(User.id.asc()).all()
+
+@router.delete("/users/{user_id}")
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin)
+):
+    """Admin endpoint to delete a user and wipe their associated telemetry records."""
+    if admin.id == user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own active administrator account."
+        )
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    
+    from app.db.models import Location
+    db.query(Location).filter(Location.user_id == user_id).delete()
+    
+    db.delete(target_user)
+    db.commit()
+    return {"message": f"User {target_user.email} successfully deleted"}
