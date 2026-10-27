@@ -207,8 +207,8 @@ export default function TrackingScreen({ user, onLogout }) {
               </Text>
             </View>
             <View>
-              <Text style={styles.userName}>{user.name}</Text>
-              <Text style={styles.userEmail}>{user.email}</Text>
+              <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#06b6d4', textTransform: 'uppercase' }}>CM Vechicle</Text>
+              <Text style={styles.userName}>{user.name || user.email}</Text>
             </View>
           </View>
           <TouchableOpacity style={styles.logoutBtn} onPress={onLogout}>
