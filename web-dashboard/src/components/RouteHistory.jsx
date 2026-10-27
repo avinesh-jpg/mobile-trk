@@ -45,6 +45,34 @@ function sliceSegments(segments, count) {
 }
 
 // Animated Replay Vehicle Marker with rotating heading needle
+const createStartIcon = () => {
+  return L.divIcon({
+    className: 'custom-start-pin',
+    html: `
+      <div style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: #10b981; border: 2.5px solid #ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-size: 15px;">
+        🏁
+      </div>
+    `,
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+    popupAnchor: [0, -16]
+  });
+};
+
+const createEndIcon = () => {
+  return L.divIcon({
+    className: 'custom-end-pin',
+    html: `
+      <div style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: #ef4444; border: 2.5px solid #ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-size: 15px;">
+        🎯
+      </div>
+    `,
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+    popupAnchor: [0, -16]
+  });
+};
+
 const createReplayMarkerIcon = (initials, heading = 0, speed = 0) => {
   return L.divIcon({
     className: 'custom-replay-marker',
@@ -523,7 +551,7 @@ export default function RouteHistory() {
 
               {/* Start Point Marker */}
               {startPoint && (
-                <Marker position={startPoint}>
+                <Marker position={startPoint} icon={createStartIcon()}>
                   <Popup>
                     <div className="p-1 text-slate-900 font-semibold text-xs">
                       🏁 Journey Start: {new Date(history[0].recorded_at).toLocaleTimeString()}
@@ -534,7 +562,7 @@ export default function RouteHistory() {
 
               {/* End Point Marker */}
               {endPoint && (
-                <Marker position={endPoint}>
+                <Marker position={endPoint} icon={createEndIcon()}>
                   <Popup>
                     <div className="p-1 text-slate-900 font-semibold text-xs">
                       🎯 Final Point: {new Date(history[history.length - 1].recorded_at).toLocaleTimeString()}

@@ -1,7 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { MapContainer, TileLayer, Circle, Marker, Popup } from 'react-leaflet';
+import L from 'leaflet';
 import { api } from '../api';
 import { Shield, Plus, Trash2, MapPin } from 'lucide-react';
+
+const createGeofenceMarkerIcon = () => L.divIcon({
+  className: 'custom-geofence-pin',
+  html: `
+    <div style="display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: #6366f1; border: 2.5px solid #ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-size: 14px;">
+      🏢
+    </div>
+  `,
+  iconSize: [30, 30],
+  iconAnchor: [15, 15],
+  popupAnchor: [0, -15]
+});
 
 export default function GeofenceManager() {
   const [geofences, setGeofences] = useState([]);
@@ -171,7 +184,7 @@ export default function GeofenceManager() {
                 radius={geo.radius_meters}
                 pathOptions={{ color: '#06b6d4', fillColor: '#06b6d4', fillOpacity: 0.2 }}
               />
-              <Marker position={[geo.latitude, geo.longitude]}>
+              <Marker position={[geo.latitude, geo.longitude]} icon={createGeofenceMarkerIcon()}>
                 <Popup>
                   <div className="p-1 text-slate-900 font-semibold text-xs">
                     🏢 {geo.name} ({geo.radius_meters}m zone)
