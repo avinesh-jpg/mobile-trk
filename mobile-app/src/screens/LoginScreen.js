@@ -15,9 +15,8 @@ import api from '../services/api';
 import { DEFAULT_API_HOST } from '../config';
 
 export default function LoginScreen({ onLoginSuccess }) {
-  const [email, setEmail] = useState('employee@company.com');
-  const [password, setPassword] = useState('emp123');
-  const [serverHost, setServerHost] = useState(DEFAULT_API_HOST);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
   const handleLogin = async () => {
@@ -28,14 +27,14 @@ export default function LoginScreen({ onLoginSuccess }) {
 
     setLoading(true);
     try {
-      await AsyncStorage.setItem('server_host', serverHost);
-      const res = await api.post('/auth/login', { email, password });
+      await AsyncStorage.setItem('server_host', DEFAULT_API_HOST);
+      const res = await api.post('/auth/login', { email: email.trim(), password: password.trim() });
       
       await AsyncStorage.setItem('auth_token', res.data.access_token);
       await AsyncStorage.setItem('user_profile', JSON.stringify(res.data));
       onLoginSuccess(res.data);
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Unable to connect to server. Check IP and Wi-Fi.';
+      const msg = err.response?.data?.detail || 'Unable to connect to server. Please check your credentials.';
       Alert.alert('Login Failed', msg);
     } finally {
       setLoading(false);
@@ -49,8 +48,8 @@ export default function LoginScreen({ onLoginSuccess }) {
     >
       <View style={styles.card}>
         <View style={styles.header}>
-          <Text style={styles.title}>GeoTrack Field</Text>
-          <Text style={styles.subtitle}>Employee Traveling Companion</Text>
+          <Text style={styles.title}>CM Vechicle</Text>
+          <Text style={styles.subtitle}>Fleet Vehicle Tracking</Text>
         </View>
 
         <View style={styles.form}>
@@ -61,7 +60,7 @@ export default function LoginScreen({ onLoginSuccess }) {
             onChangeText={setEmail}
             keyboardType="email-address"
             autoCapitalize="none"
-            placeholder="employee@company.com"
+            placeholder="Enter your email"
             placeholderTextColor="#64748b"
           />
 
@@ -71,16 +70,7 @@ export default function LoginScreen({ onLoginSuccess }) {
             value={password}
             onChangeText={setPassword}
             secureTextEntry
-            placeholder="••••••••"
-            placeholderTextColor="#64748b"
-          />
-
-          <Text style={styles.label}>Cloud Server Host</Text>
-          <TextInput
-            style={[styles.input, styles.inputServer]}
-            value={serverHost}
-            onChangeText={setServerHost}
-            placeholder="https://geotrack-backend-e812.onrender.com/api/v1"
+            placeholder="Enter your password"
             placeholderTextColor="#64748b"
           />
 
@@ -92,14 +82,10 @@ export default function LoginScreen({ onLoginSuccess }) {
             {loading ? (
               <ActivityIndicator color="#ffffff" />
             ) : (
-              <Text style={styles.buttonText}>Sign In to Start Shift</Text>
+              <Text style={styles.buttonText}>Sign In</Text>
             )}
           </TouchableOpacity>
         </View>
-
-        <Text style={styles.footerNote}>
-          Default demo login: employee@company.com / emp123
-        </Text>
       </View>
     </KeyboardAvoidingView>
   );

@@ -148,7 +148,7 @@ export default function TrackingScreen({ user, onLogout }) {
                 timeInterval: 5000,
                 distanceInterval: 5,
                 foregroundService: {
-                  notificationTitle: 'GeoTrack Shift Active',
+                  notificationTitle: 'CM Vechicle Active',
                   notificationBody: 'Live tracking active (< 3s real-time stream).',
                   notificationColor: '#0284c7',
                 },

@@ -87,7 +87,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     private fun startTrackingService() {
-        val notification = buildForegroundNotification("GeoTrack Shift Active", "Live location & telemetry streaming (< 3s real-time stream)")
+        val notification = buildForegroundNotification("CM Vechicle Active", "Live vehicle tracking active (< 3s real-time stream)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {

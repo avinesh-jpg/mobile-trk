@@ -1030,7 +1030,7 @@ fun TrackingScreen(
             },
             text = {
                 Text(
-                    text = "GeoTrack requires location access to record accurate GPS coordinates, stream telemetry, and verify shift attendance while on duty.\n\nWithout this permission, the app cannot track your shift. Please grant 'Precise Location' permission to continue.",
+                    text = "CM Vechicle requires location access to record accurate GPS coordinates, stream telemetry, and verify shift attendance while on duty.\n\nWithout this permission, the app cannot track your shift. Please grant 'Precise Location' permission to continue.",
                     color = TextSecondary,
                     fontSize = 14.sp
                 )
@@ -1171,7 +1171,7 @@ private fun LocationStatusBanner(
                     }
 
                     Text(
-                        text = "GeoTrack requires location permission to record GPS coordinates and track your route while a shift is active.",
+                        text = "CM Vechicle requires location permission to record GPS coordinates and track your route while a shift is active.",
                         fontSize = 12.sp,
                         color = TextSecondary
                     )
