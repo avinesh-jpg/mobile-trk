@@ -217,7 +217,7 @@ fun TrackingScreen(
                     if (isShiftActive) {
                         scope.launch {
                             LocationTrackingService.stopService(context)
-                            trackingRepository.stopShift()
+                            trackingRepository.endShift()
                             authRepository.logout()
                             onLogout()
                         }
@@ -320,7 +320,7 @@ fun TrackingScreen(
                         // End Shift
                         scope.launch {
                             LocationTrackingService.stopService(context)
-                            trackingRepository.stopShift()
+                            trackingRepository.endShift()
                         }
                     } else {
                         // Start Shift

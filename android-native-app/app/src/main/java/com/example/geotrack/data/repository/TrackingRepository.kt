@@ -219,6 +219,8 @@ class TrackingRepository(
         updateCounts()
     }
 
+    suspend fun stopShift() = endShift()
+
     suspend fun recordLocationPing(
         lat: Double,
         lng: Double,
