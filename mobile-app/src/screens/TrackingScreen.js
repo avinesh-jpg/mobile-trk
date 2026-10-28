@@ -14,7 +14,7 @@ import { LOCATION_TASK_NAME } from '../config';
 import api from '../services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
-import { syncOfflineLocations } from '../services/offlineStorage';
+import { saveOfflineLocation, syncOfflineLocations } from '../services/offlineStorage';
 
 const isExpoGo = Constants.appOwnership === 'expo' || Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
 
@@ -76,7 +76,7 @@ export default function TrackingScreen({ user, onLogout }) {
       const cleanSpeed = isPhysicallyMoving ? Math.round(rawSpeedKmh) : 0;
       const cleanActivity = isPhysicallyMoving ? (rawSpeedKmh > 12 ? 'in_vehicle' : 'walking') : 'still';
 
-      await api.post('/location/ping', {
+      const payload = {
         latitude: coords.latitude,
         longitude: coords.longitude,
         altitude: coords.altitude || null,
@@ -88,11 +88,18 @@ export default function TrackingScreen({ user, onLogout }) {
         activity_type: cleanActivity,
         is_mock: isMock || coords.mocked || false,
         recorded_at: new Date().toISOString(),
-      });
-      // Automatically flush any cached offline points
-      await syncOfflineLocations();
+      };
+
+      try {
+        await api.post('/location/ping', payload);
+        // Automatically flush any cached offline points
+        await syncOfflineLocations();
+      } catch (err) {
+        console.log('Telemetry sync postponed, caching offline:', err.message);
+        await saveOfflineLocation(payload);
+      }
     } catch (err) {
-      console.log('Telemetry sync postponed:', err.message);
+      console.log('Telemetry processing error:', err.message);
     }
   };
 
@@ -112,12 +119,12 @@ export default function TrackingScreen({ user, onLogout }) {
         foregroundWatcher.current = null;
       }
 
-      // 1. High GPS accuracy captures satellite coordinates every 3s
+      // 1. High GPS accuracy captures satellite coordinates every 10s
       foregroundWatcher.current = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.High,
-          timeInterval: 3000,
-          distanceInterval: 2,
+          timeInterval: 10000,
+          distanceInterval: 10,
         },
         (loc) => {
           sendLocationPing(loc.coords, loc.mocked);
@@ -145,11 +152,11 @@ export default function TrackingScreen({ user, onLogout }) {
             if (!alreadyRunning) {
               await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
                 accuracy: Location.Accuracy.High,
-                timeInterval: 5000,
-                distanceInterval: 5,
+                timeInterval: 10000,
+                distanceInterval: 10,
                 foregroundService: {
                   notificationTitle: 'CM Vechicle Active',
-                  notificationBody: 'Live tracking active (< 3s real-time stream).',
+                  notificationBody: 'Live tracking active (10s stream).',
                   notificationColor: '#0284c7',
                 },
               });

@@ -87,7 +87,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     private fun startTrackingService() {
-        val notification = buildForegroundNotification("CM Vechicle Active", "Live vehicle tracking active (< 3s real-time stream)")
+        val notification = buildForegroundNotification("CM Vechicle Active", "Live vehicle tracking active (10s stream)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
@@ -130,20 +130,20 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     private fun registerLocationUpdates() {
         try {
             locationManager?.let { lm ->
-                // Use 0f minDistance so updates are emitted even when stationary
+                // Optimized 10-second interval to stay within Supabase 500MB free tier and save battery
                 if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                     lm.requestLocationUpdates(
                         LocationManager.GPS_PROVIDER,
-                        3000L,
-                        0.0f,
+                        10000L,
+                        5.0f,
                         this
                     )
                 }
                 if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                     lm.requestLocationUpdates(
                         LocationManager.NETWORK_PROVIDER,
-                        4000L,
-                        0.0f,
+                        15000L,
+                        10.0f,
                         this
                     )
                 }
@@ -164,10 +164,10 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
         heartbeatJob?.cancel()
         heartbeatJob = serviceScope.launch {
             while (isActive) {
-                delay(3500)
+                delay(12000)
                 val now = System.currentTimeMillis()
-                // If no update from OS listener in 3.5s, emit heartbeat with best available position
-                if (now - lastRecordedPingTime >= 3000) {
+                // If no update from OS listener in 12s, emit heartbeat with best available position
+                if (now - lastRecordedPingTime >= 10000) {
                     val loc = lastKnownLocation ?: fetchCurrentLocation()
                     if (loc != null) {
                         dispatchLocationPing(loc)
@@ -209,7 +209,9 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     private fun dispatchLocationPing(location: Location) {
-        lastRecordedPingTime = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        if (now - lastRecordedPingTime < 8000) return
+        lastRecordedPingTime = now
         val batteryPct = getBatteryPercentage()
         val isMock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             location.isMock

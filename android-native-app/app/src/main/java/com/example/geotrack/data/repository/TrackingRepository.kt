@@ -8,12 +8,15 @@ import com.example.geotrack.data.model.ShiftRecord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -80,6 +83,17 @@ class TrackingRepository(
     init {
         scope.launch {
             updateCounts()
+            syncOfflineLocations()
+            // Periodic background flush every 15 seconds to sync any offline buffered pings
+            while (isActive) {
+                delay(15000)
+                try {
+                    val count = localDataSource.getUnsyncedPings().size
+                    if (count > 0) {
+                        syncOfflineLocations()
+                    }
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -131,6 +145,7 @@ class TrackingRepository(
         )
         localDataSource.insertOrUpdateShift(record)
         updateCounts()
+        scope.launch { syncOfflineLocations() }
         shiftId
     }
 
@@ -285,6 +300,15 @@ class TrackingRepository(
             localDataSource.markPingsSynced(listOf(insertedId))
             _lastCloudSyncStatus.value = "Synced to Cloud (201 OK) • Ping #$insertedId"
             _lastSyncTimestamp.value = now
+            // Auto-flush any queued offline pings since cloud connection is verified active
+            scope.launch {
+                try {
+                    val pending = localDataSource.getUnsyncedPings()
+                    if (pending.isNotEmpty()) {
+                        syncOfflineLocations()
+                    }
+                } catch (_: Exception) {}
+            }
         } else {
             _lastCloudSyncStatus.value = "Saved in SQLite • Offline queued ($responseDesc)"
         }
@@ -340,24 +364,81 @@ class TrackingRepository(
         }
     }
 
+    private suspend fun sendBatchToCloud(pings: List<LocationPing>): Boolean = withContext(Dispatchers.IO) {
+        val user = authRepository.currentUser.value
+        try {
+            val host = authRepository.serverHost.value
+            val url = URL("$host/location/batch")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                if (!user?.token.isNullOrEmpty()) {
+                    setRequestProperty("Authorization", "Bearer ${user?.token}")
+                }
+                connectTimeout = 12000
+                readTimeout = 12000
+                doOutput = true
+            }
+
+            val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+
+            val array = JSONArray()
+            for (p in pings) {
+                val obj = JSONObject().apply {
+                    put("latitude", p.latitude)
+                    put("longitude", p.longitude)
+                    put("altitude", p.altitude ?: JSONObject.NULL)
+                    put("speed", p.speed)
+                    put("heading", p.heading)
+                    put("accuracy", p.accuracy)
+                    put("battery_level", p.batteryLevel ?: JSONObject.NULL)
+                    put("is_moving", p.isMoving)
+                    put("activity_type", p.activityType)
+                    put("is_mock", p.isMock)
+                    put("recorded_at", isoFormat.format(Date(p.recordedAt)))
+                }
+                array.put(obj)
+            }
+
+            val body = JSONObject().apply {
+                put("locations", array)
+            }.toString()
+
+            OutputStreamWriter(conn.outputStream).use { it.write(body) }
+            val code = conn.responseCode
+            code in 200..299
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     suspend fun syncOfflineLocations(): Int = withContext(Dispatchers.IO) {
         val unsynced = localDataSource.getUnsyncedPings()
         if (unsynced.isEmpty()) return@withContext 0
 
-        val syncedIds = mutableListOf<Long>()
-        for (p in unsynced) {
-            val (sent, _) = sendPingToCloud(p)
-            if (sent) {
-                syncedIds.add(p.id)
+        var totalSynced = 0
+        // Batch upload in chunks of 50 to optimize payload size and server processing
+        val chunks = unsynced.chunked(50)
+        for (chunk in chunks) {
+            val success = sendBatchToCloud(chunk)
+            if (success) {
+                val ids = chunk.map { it.id }
+                localDataSource.markPingsSynced(ids)
+                totalSynced += chunk.size
+            } else {
+                // If cloud connection failed, break and retry on next cycle
+                break
             }
         }
-        if (syncedIds.isNotEmpty()) {
-            localDataSource.markPingsSynced(syncedIds)
-            _lastCloudSyncStatus.value = "Synced ${syncedIds.size} queued pings to Cloud"
+        if (totalSynced > 0) {
+            _lastCloudSyncStatus.value = "Synced $totalSynced queued pings to Cloud via Batch API"
             _lastSyncTimestamp.value = System.currentTimeMillis()
         }
         updateCounts()
-        syncedIds.size
+        totalSynced
     }
 
     private suspend fun updateCounts() {

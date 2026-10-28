@@ -100,10 +100,13 @@ fun TrackingScreen(
     var showGpsDisabledDialog by remember { mutableStateOf(false) }
     var startShiftPending by remember { mutableStateOf(false) }
 
-    // Re-verify permission and GPS state when app returns to foreground
+    // Re-verify permission, GPS state, and sync offline points when app returns to foreground
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         hasLocationPermission = hasLocationPermissions(context)
         isGpsHardwareEnabled = isDeviceLocationEnabled(context)
+        scope.launch {
+            trackingRepository.syncOfflineLocations()
+        }
     }
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
