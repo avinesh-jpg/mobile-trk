@@ -63,18 +63,21 @@ class AuthRepository(context: Context) {
         val pass = passInput.trim()
         val host = _serverHost.value
 
-        var serverAuthAttempted = false
         var serverFailureReason: String? = null
 
+        // 1. Check if user already logged in previously on this device with matching email
+        val cachedUser = _currentUser.value
+        val hasMatchingCache = cachedUser != null && cachedUser.email.equals(email, ignoreCase = true)
+
         try {
-            // First attempt real backend login call
+            // Attempt real backend authentication with a generous 18s timeout for cloud cold starts
             val loginUrl = URL("$host/auth/login")
             val conn = (loginUrl.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
-                connectTimeout = 10000
-                readTimeout = 10000
+                connectTimeout = 18000
+                readTimeout = 18000
                 doOutput = true
             }
 
@@ -84,19 +87,22 @@ class AuthRepository(context: Context) {
             }.toString()
 
             OutputStreamWriter(conn.outputStream).use { it.write(body) }
-            serverAuthAttempted = true
             val code = conn.responseCode
 
             if (code in 200..299) {
                 val responseText = conn.inputStream.bufferedReader().use { it.readText() }
                 val json = JSONObject(responseText)
                 val token = json.optString("access_token", "")
-                val name = json.optString("name", email.substringBefore("@").replace(".", " ").replaceFirstChar { it.uppercase() })
+                val cleanName = json.optString(
+                    "name",
+                    email.substringBefore("@").replace(".", " ").split(" ")
+                        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+                )
                 val role = json.optString("role", if (email.contains("admin")) "admin" else "employee")
-                val userId = json.optString("user_id", "2")
+                val userId = json.optString("user_id", "1")
                 val user = User(
                     id = userId,
-                    name = name,
+                    name = cleanName,
                     email = email,
                     role = role,
                     token = token,
@@ -104,82 +110,37 @@ class AuthRepository(context: Context) {
                 )
                 saveUser(user, isOffline = false)
                 return@withContext Result.success(user)
-            } else if (code == 401 || code == 404 || code == 422) {
-                // If account doesn't exist on this backend, auto-register on the live backend
-                try {
-                    val regUrl = URL("$host/auth/register")
-                    val regConn = (regUrl.openConnection() as HttpURLConnection).apply {
-                        requestMethod = "POST"
-                        setRequestProperty("Content-Type", "application/json")
-                        setRequestProperty("Accept", "application/json")
-                        connectTimeout = 8000
-                        readTimeout = 8000
-                        doOutput = true
-                    }
-                    val formattedName = email.substringBefore("@").replace(".", " ").split(" ")
-                        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
-                    val regBody = JSONObject().apply {
-                        put("name", formattedName.ifEmpty { "Field Tech" })
-                        put("email", email)
-                        put("password", pass)
-                        put("role", if (email.contains("admin")) "admin" else "employee")
-                    }.toString()
-
-                    OutputStreamWriter(regConn.outputStream).use { it.write(regBody) }
-                    val regCode = regConn.responseCode
-
-                    if (regCode in 200..299) {
-                        // Registration succeeded! Now log in to get the real JWT token
-                        val retryLoginConn = (loginUrl.openConnection() as HttpURLConnection).apply {
-                            requestMethod = "POST"
-                            setRequestProperty("Content-Type", "application/json")
-                            setRequestProperty("Accept", "application/json")
-                            connectTimeout = 8000
-                            readTimeout = 8000
-                            doOutput = true
-                        }
-                        OutputStreamWriter(retryLoginConn.outputStream).use { it.write(body) }
-                        if (retryLoginConn.responseCode in 200..299) {
-                            val rText = retryLoginConn.inputStream.bufferedReader().use { it.readText() }
-                            val rJson = JSONObject(rText)
-                            val token = rJson.optString("access_token", "")
-                            val userId = rJson.optString("user_id", "2")
-                            val user = User(
-                                id = userId,
-                                name = formattedName,
-                                email = email,
-                                role = if (email.contains("admin")) "admin" else "employee",
-                                token = token,
-                                serverHost = host
-                            )
-                            saveUser(user, isOffline = false)
-                            return@withContext Result.success(user)
-                        }
-                    }
-                } catch (regEx: Exception) {
-                    serverFailureReason = regEx.message
-                }
+            } else if (code == 401) {
+                return@withContext Result.failure(Exception("Incorrect email or password. Please verify your credentials."))
+            } else {
+                serverFailureReason = "Server responded with error code $code"
             }
         } catch (netEx: Exception) {
-            serverFailureReason = netEx.localizedMessage
+            serverFailureReason = netEx.localizedMessage ?: "Network connection error"
         }
 
-        // If server is unreachable or offline, allow demo offline fallback
-        if (email.isNotBlank()) {
-            val role = if (email.contains("admin")) "dispatcher" else "technician"
-            val name = if (role == "dispatcher") "Marcus Vance (Ops)" else "Alex Mercer (Senior Tech)"
-            val user = User(
-                id = if (role == "dispatcher") "disp_01" else "emp_101",
-                name = name,
+        // 2. If device is offline but driver previously logged in, allow them to resume shift offline
+        if (hasMatchingCache && cachedUser != null) {
+            _isOfflineMode.value = true
+            return@withContext Result.success(cachedUser)
+        }
+
+        // 3. If driver has never logged in and network is unavailable, derive their real name from email (never Alex Mercer)
+        if (email.isNotBlank() && pass.isNotBlank()) {
+            val formattedName = email.substringBefore("@").replace(".", " ").split(" ")
+                .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+            val fallbackUser = User(
+                id = "emp_offline",
+                name = formattedName.ifEmpty { "Field Driver" },
                 email = email,
-                role = role,
-                token = "demo_jwt_token_${System.currentTimeMillis()}",
-                serverHost = _serverHost.value
+                role = if (email.contains("admin")) "admin" else "employee",
+                token = "offline_jwt_token_${System.currentTimeMillis()}",
+                serverHost = host
             )
-            saveUser(user, isOffline = true)
-            Result.success(user)
+            saveUser(fallbackUser, isOffline = true)
+            Result.success(fallbackUser)
         } else {
-            Result.failure(Exception(serverFailureReason ?: "Invalid email or password"))
+            Result.failure(Exception(serverFailureReason ?: "Unable to connect to server. Please check your internet."))
         }
     }
 
