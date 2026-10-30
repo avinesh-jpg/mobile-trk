@@ -200,6 +200,24 @@ export default function RouteHistory() {
     };
   }, [history, selectedUser, date, profile]);
 
+  const handleClearHistory = async () => {
+    if (!selectedUser) return;
+    if (window.confirm("Clear all historical test telemetry for this employee? This will reset distance to 0 m.")) {
+      try {
+        await api.delete(`/location/clear/${selectedUser}`);
+        setHistory([]);
+        setSnappedSegments([]);
+        setSnappedCoords([]);
+        setSnappedDistanceMeters(null);
+        setSnapFailed(false);
+        setReplayIndex(0);
+        setIsPlaying(false);
+      } catch (err) {
+        console.error("Clear error:", err);
+      }
+    }
+  };
+
   // Accurate Physical Travel Distance (Matches backend logic)
   let rawMeters = 0;
   if (history.length > 1) {
