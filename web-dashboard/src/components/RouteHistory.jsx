@@ -200,28 +200,31 @@ export default function RouteHistory() {
     };
   }, [history, selectedUser, date, profile]);
 
-  // Route Replay Playback Timer
+  // Route Replay Playback Timer (Steps through detailed road points when snapped)
+  const replayMax = useSnapped ? Math.max(0, activePolyline.length - 1) : Math.max(0, history.length - 1);
+
   useEffect(() => {
     if (!isPlaying) {
       if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
       return;
     }
 
-    const intervalMs = Math.max(100, Math.round(1000 / playbackSpeed));
+    // Smooth playback interval based on number of points
+    const stepDuration = useSnapped ? Math.max(30, Math.round(200 / playbackSpeed)) : Math.max(100, Math.round(1000 / playbackSpeed));
     replayIntervalRef.current = setInterval(() => {
       setReplayIndex((prev) => {
-        if (prev >= history.length - 1) {
+        if (prev >= replayMax) {
           setIsPlaying(false);
           return prev;
         }
         return prev + 1;
       });
-    }, intervalMs);
+    }, stepDuration);
 
     return () => {
       if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
     };
-  }, [isPlaying, playbackSpeed, history.length]);
+  }, [isPlaying, playbackSpeed, replayMax, useSnapped]);
 
   const handleClearHistory = async () => {
     if (!selectedUser) return;
@@ -282,29 +285,31 @@ export default function RouteHistory() {
   const endPoint = useSnapped && activePolyline.length > 0 ? activePolyline[activePolyline.length - 1] : rawPolylineCoords[rawPolylineCoords.length - 1];
 
   // Traveled portion of the path for replay highlighting
-  const replayFraction = history.length > 1 ? replayIndex / (history.length - 1) : 0;
-  const traveledPolylineCutoff = Math.max(1, Math.round(activePolyline.length * replayFraction));
+  const currentPolylineIndex = useSnapped ? replayIndex : Math.max(0, Math.min(activePolyline.length - 1, Math.round(activePolyline.length * (history.length > 1 ? replayIndex / (history.length - 1) : 0))));
+  const traveledPolylineCutoff = Math.max(1, currentPolylineIndex + 1);
   const traveledSegments = sliceSegments(activeSegments, traveledPolylineCutoff);
 
-  // Replay Current Point (Snaps vehicle marker to the exact road geometry)
-  const currentReplayPoint = history[replayIndex] || null;
-  const snappedIndex = Math.max(0, Math.min(activePolyline.length - 1, traveledPolylineCutoff - 1));
-  const currentReplayCoord = (useSnapped && activePolyline[snappedIndex])
-    ? activePolyline[snappedIndex]
-    : (currentReplayPoint ? [currentReplayPoint.latitude, currentReplayPoint.longitude] : null);
+  // Replay Current Point (Directly moves along the road coordinates)
+  const currentReplayCoord = activePolyline[currentPolylineIndex] || (history[0] ? [history[0].latitude, history[0].longitude] : null);
+
+  // Telemetry attributes mapped accurately to the current position
+  const mappedHistoryIndex = useSnapped
+    ? Math.max(0, Math.min(history.length - 1, Math.round((currentPolylineIndex / Math.max(1, activePolyline.length - 1)) * (history.length - 1))))
+    : replayIndex;
+  const currentReplayPoint = history[mappedHistoryIndex] || history[0] || null;
 
   // Compute heading dynamically for replay marker (orient along the road tangent when snapped)
   let currentReplayHeading = currentReplayPoint?.heading || 0;
   if (useSnapped && activePolyline.length > 1) {
-    const nextIdx = Math.min(activePolyline.length - 1, snappedIndex + 1);
-    if (nextIdx !== snappedIndex) {
+    const nextIdx = Math.min(activePolyline.length - 1, currentPolylineIndex + 1);
+    if (nextIdx !== currentPolylineIndex) {
       currentReplayHeading = calculateBearing(
-        activePolyline[snappedIndex][0], activePolyline[snappedIndex][1],
+        activePolyline[currentPolylineIndex][0], activePolyline[currentPolylineIndex][1],
         activePolyline[nextIdx][0], activePolyline[nextIdx][1]
       );
     }
-  } else if (!currentReplayHeading && replayIndex < history.length - 1) {
-    const nextPoint = history[replayIndex + 1];
+  } else if (!currentReplayHeading && mappedHistoryIndex < history.length - 1) {
+    const nextPoint = history[mappedHistoryIndex + 1];
     currentReplayHeading = calculateBearing(
       currentReplayPoint.latitude, currentReplayPoint.longitude,
       nextPoint.latitude, nextPoint.longitude
@@ -627,8 +632,8 @@ export default function RouteHistory() {
               <input
                 type="range"
                 min={0}
-                max={history.length - 1}
-                value={replayIndex}
+                max={replayMax}
+                value={Math.min(replayIndex, replayMax)}
                 onChange={(e) => {
                   setReplayIndex(Number(e.target.value));
                   setIsPlaying(false);
