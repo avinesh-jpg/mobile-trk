@@ -200,50 +200,6 @@ export default function RouteHistory() {
     };
   }, [history, selectedUser, date, profile]);
 
-  // Route Replay Playback Timer (Steps through detailed road points when snapped)
-  const replayMax = useSnapped ? Math.max(0, activePolyline.length - 1) : Math.max(0, history.length - 1);
-
-  useEffect(() => {
-    if (!isPlaying) {
-      if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
-      return;
-    }
-
-    // Smooth playback interval based on number of points
-    const stepDuration = useSnapped ? Math.max(30, Math.round(200 / playbackSpeed)) : Math.max(100, Math.round(1000 / playbackSpeed));
-    replayIntervalRef.current = setInterval(() => {
-      setReplayIndex((prev) => {
-        if (prev >= replayMax) {
-          setIsPlaying(false);
-          return prev;
-        }
-        return prev + 1;
-      });
-    }, stepDuration);
-
-    return () => {
-      if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
-    };
-  }, [isPlaying, playbackSpeed, replayMax, useSnapped]);
-
-  const handleClearHistory = async () => {
-    if (!selectedUser) return;
-    if (window.confirm("Clear all historical test telemetry for this employee? This will reset distance to 0 m.")) {
-      try {
-        await api.delete(`/location/clear/${selectedUser}`);
-        setHistory([]);
-        setSnappedSegments([]);
-        setSnappedCoords([]);
-        setSnappedDistanceMeters(null);
-        setSnapFailed(false);
-        setReplayIndex(0);
-        setIsPlaying(false);
-      } catch (err) {
-        console.error("Clear error:", err);
-      }
-    }
-  };
-
   // Accurate Physical Travel Distance (Matches backend logic)
   let rawMeters = 0;
   if (history.length > 1) {
@@ -283,6 +239,32 @@ export default function RouteHistory() {
   const activeSegments = useSnapped ? snappedSegments : [rawPolylineCoords];
   const startPoint = useSnapped && activePolyline.length > 0 ? activePolyline[0] : rawPolylineCoords[0];
   const endPoint = useSnapped && activePolyline.length > 0 ? activePolyline[activePolyline.length - 1] : rawPolylineCoords[rawPolylineCoords.length - 1];
+
+  // Route Replay Playback Timer (Steps through detailed road points when snapped)
+  const replayMax = useSnapped ? Math.max(0, activePolyline.length - 1) : Math.max(0, history.length - 1);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
+      return;
+    }
+
+    // Smooth playback interval based on number of points
+    const stepDuration = useSnapped ? Math.max(30, Math.round(200 / playbackSpeed)) : Math.max(100, Math.round(1000 / playbackSpeed));
+    replayIntervalRef.current = setInterval(() => {
+      setReplayIndex((prev) => {
+        if (prev >= replayMax) {
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, stepDuration);
+
+    return () => {
+      if (replayIntervalRef.current) clearInterval(replayIntervalRef.current);
+    };
+  }, [isPlaying, playbackSpeed, replayMax, useSnapped]);
 
   // Traveled portion of the path for replay highlighting
   const currentPolylineIndex = useSnapped ? replayIndex : Math.max(0, Math.min(activePolyline.length - 1, Math.round(activePolyline.length * (history.length > 1 ? replayIndex / (history.length - 1) : 0))));
