@@ -323,22 +323,25 @@ def get_snapped_route(
     is_past_day = date_str < today_ist
 
     if is_past_day:
-        cached = (
-            db.query(RouteCache)
-            .filter(RouteCache.user_id == user_id, RouteCache.day == date_str, RouteCache.profile == profile)
-            .first()
-        )
-        if cached:
-            segments = json.loads(cached.geometry)
-            return {
-                "segments": segments,
-                "coordinates": [pt for seg in segments for pt in seg],
-                "distance_m": cached.distance_m or 0.0,
-                "snapped": True,
-                "failed_chunks": 0,
-                "profile": profile,
-                "cached": True,
-            }
+        try:
+            cached = (
+                db.query(RouteCache)
+                .filter(RouteCache.user_id == user_id, RouteCache.day == date_str, RouteCache.profile == profile)
+                .first()
+            )
+            if cached:
+                segments = json.loads(cached.geometry)
+                return {
+                    "segments": segments,
+                    "coordinates": [pt for seg in segments for pt in seg],
+                    "distance_m": cached.distance_m or 0.0,
+                    "snapped": True,
+                    "failed_chunks": 0,
+                    "profile": profile,
+                    "cached": True,
+                }
+        except Exception as e:
+            db.rollback()
 
     start = day.replace(tzinfo=IST)
     end = start + timedelta(days=1)
