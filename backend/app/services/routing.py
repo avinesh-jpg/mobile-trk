@@ -16,7 +16,7 @@ import requests
 
 from app.core.config import settings
 
-CHUNK_SIZE = 80          # points per OSRM request
+CHUNK_SIZE = 8           # OSRM public demo server limits /match to 10 points
 CHUNK_OVERLAP = 1        # shared point between chunks so segments join up
 MIN_RADIUS_M = 10.0      # OSRM default (5 m) is too tight for phone GPS
 MAX_RADIUS_M = 50.0
@@ -38,7 +38,7 @@ def haversine_m(a: LatLng, b: LatLng) -> float:
 
 
 def prepare_points(locations: list) -> List[Dict[str, Any]]:
-    """Convert DB rows to plain dicts with strictly increasing timestamps."""
+    """Convert DB rows to plain dicts with strictly increasing timestamps and remove stationary jitter."""
     pts: List[Dict[str, Any]] = []
     last_ts: Optional[int] = None
     for loc in locations:
@@ -47,11 +47,19 @@ def prepare_points(locations: list) -> List[Dict[str, Any]]:
         ts = int(loc.recorded_at.timestamp())
         if last_ts is not None and ts <= last_ts:
             continue  # OSRM requires strictly increasing timestamps
+        
+        lat = float(loc.latitude)
+        lng = float(loc.longitude)
+        
+        # Filter out standing-still jitter (< 3 meters)
+        if pts and haversine_m([pts[-1]["lat"], pts[-1]["lng"]], [lat, lng]) < 3.0:
+            continue
+
         last_ts = ts
         acc = loc.accuracy if loc.accuracy is not None else 20.0
         pts.append({
-            "lat": float(loc.latitude),
-            "lng": float(loc.longitude),
+            "lat": lat,
+            "lng": lng,
             "ts": ts,
             "radius": max(MIN_RADIUS_M, min(float(acc), MAX_RADIUS_M)),
         })
@@ -111,6 +119,68 @@ def _match_chunk(
     return segments, distance
 
 
+def _route_chunk(
+    session: requests.Session,
+    chunk: List[Dict[str, Any]],
+    profile: str,
+) -> Optional[Tuple[List[List[LatLng]], float]]:
+    """
+    Calculate physical road geometry across chunk waypoints using OSRM routing.
+    This mimics Rapido / Uber / Google Maps route assignment along physical streets.
+    """
+    coords = ";".join(f"{p['lng']:.6f},{p['lat']:.6f}" for p in chunk)
+    params = {
+        "geometries": "geojson",
+        "overview": "full",
+        "steps": "false",
+    }
+    url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{coords}"
+    try:
+        resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT_S)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("code") == "Ok" and data.get("routes"):
+                route = data["routes"][0]
+                geometry = route.get("geometry", {}).get("coordinates", [])
+                line = [[lat, lng] for lng, lat in geometry]
+                if len(line) >= 2:
+                    return [line], float(route.get("distance") or 0.0)
+    except (requests.RequestException, ValueError):
+        pass
+
+    # Pairwise fallback between consecutive chunk waypoints if full chunk routing failed
+    sub_lines: List[LatLng] = []
+    tot_dist = 0.0
+    for i in range(len(chunk) - 1):
+        p1 = f"{chunk[i]['lng']:.6f},{chunk[i]['lat']:.6f}"
+        p2 = f"{chunk[i+1]['lng']:.6f},{chunk[i+1]['lat']:.6f}"
+        pair_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{p1};{p2}"
+        try:
+            r = session.get(pair_url, params={"geometries": "geojson", "overview": "full"}, timeout=5)
+            d = r.json()
+            if d.get("code") == "Ok" and d.get("routes"):
+                rt = d["routes"][0]
+                coords_list = [[lat, lng] for lng, lat in rt["geometry"]["coordinates"]]
+                if sub_lines:
+                    sub_lines.extend(coords_list[1:])
+                else:
+                    sub_lines.extend(coords_list)
+                tot_dist += float(rt.get("distance") or 0.0)
+                continue
+        except Exception:
+            pass
+        pt_a = [chunk[i]["lat"], chunk[i]["lng"]]
+        pt_b = [chunk[i+1]["lat"], chunk[i+1]["lng"]]
+        if not sub_lines:
+            sub_lines.append(pt_a)
+        sub_lines.append(pt_b)
+        tot_dist += haversine_m(pt_a, pt_b)
+
+    if len(sub_lines) >= 2:
+        return [sub_lines], tot_dist
+    return None
+
+
 def _raw_segment(chunk: List[Dict[str, Any]]) -> Tuple[List[LatLng], float]:
     line = [[p["lat"], p["lng"]] for p in chunk]
     dist = sum(haversine_m(line[i - 1], line[i]) for i in range(1, len(line)))
@@ -165,11 +235,14 @@ def snap_trail(locations: list, profile: str = "driving") -> Dict[str, Any]:
         for idx, chunk in enumerate(chunks):
             if idx > 0:
                 time.sleep(PAUSE_BETWEEN_CHUNKS_S)
+            # 1. First attempt map-matching (traces GPS with timestamps and accuracy)
             result = _match_chunk(session, chunk, profile)
             if result is None:
-                # one retry for transient errors / rate limiting
-                time.sleep(1.0)
-                result = _match_chunk(session, chunk, profile)
+                # 2. Rapido / Google Maps routing fallback (calculates real road curves between points)
+                time.sleep(0.15)
+                result = _route_chunk(session, chunk, profile)
+
+            # 3. Only if both OSRM match and route engines fail, fall back to raw GPS line
             if result is None:
                 failed += 1
                 line, dist = _raw_segment(chunk)

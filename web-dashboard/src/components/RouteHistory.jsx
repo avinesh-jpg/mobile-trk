@@ -278,27 +278,38 @@ export default function RouteHistory() {
   const useSnapped = snapToRoads && snappedCoords.length > 0;
   const activePolyline = useSnapped ? snappedCoords : rawPolylineCoords;
   const activeSegments = useSnapped ? snappedSegments : [rawPolylineCoords];
-  const startPoint = rawPolylineCoords[0];
-  const endPoint = rawPolylineCoords[rawPolylineCoords.length - 1];
+  const startPoint = useSnapped && activePolyline.length > 0 ? activePolyline[0] : rawPolylineCoords[0];
+  const endPoint = useSnapped && activePolyline.length > 0 ? activePolyline[activePolyline.length - 1] : rawPolylineCoords[rawPolylineCoords.length - 1];
 
-  // Replay Current Point
+  // Traveled portion of the path for replay highlighting
+  const replayFraction = history.length > 1 ? replayIndex / (history.length - 1) : 0;
+  const traveledPolylineCutoff = Math.max(1, Math.round(activePolyline.length * replayFraction));
+  const traveledSegments = sliceSegments(activeSegments, traveledPolylineCutoff);
+
+  // Replay Current Point (Snaps vehicle marker to the exact road geometry)
   const currentReplayPoint = history[replayIndex] || null;
-  const currentReplayCoord = currentReplayPoint ? [currentReplayPoint.latitude, currentReplayPoint.longitude] : null;
+  const snappedIndex = Math.max(0, Math.min(activePolyline.length - 1, traveledPolylineCutoff - 1));
+  const currentReplayCoord = (useSnapped && activePolyline[snappedIndex])
+    ? activePolyline[snappedIndex]
+    : (currentReplayPoint ? [currentReplayPoint.latitude, currentReplayPoint.longitude] : null);
 
-  // Compute heading dynamically for replay marker
+  // Compute heading dynamically for replay marker (orient along the road tangent when snapped)
   let currentReplayHeading = currentReplayPoint?.heading || 0;
-  if (!currentReplayHeading && replayIndex < history.length - 1) {
+  if (useSnapped && activePolyline.length > 1) {
+    const nextIdx = Math.min(activePolyline.length - 1, snappedIndex + 1);
+    if (nextIdx !== snappedIndex) {
+      currentReplayHeading = calculateBearing(
+        activePolyline[snappedIndex][0], activePolyline[snappedIndex][1],
+        activePolyline[nextIdx][0], activePolyline[nextIdx][1]
+      );
+    }
+  } else if (!currentReplayHeading && replayIndex < history.length - 1) {
     const nextPoint = history[replayIndex + 1];
     currentReplayHeading = calculateBearing(
       currentReplayPoint.latitude, currentReplayPoint.longitude,
       nextPoint.latitude, nextPoint.longitude
     );
   }
-
-  // Traveled portion of the path for replay highlighting
-  const replayFraction = history.length > 1 ? replayIndex / (history.length - 1) : 0;
-  const traveledPolylineCutoff = Math.max(1, Math.round(activePolyline.length * replayFraction));
-  const traveledSegments = sliceSegments(activeSegments, traveledPolylineCutoff);
 
   const selectedEmpObj = employees.find((e) => String(e.id) === String(selectedUser));
   const initials = selectedEmpObj ? selectedEmpObj.name.slice(0, 2).toUpperCase() : 'TR';
