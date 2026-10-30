@@ -96,6 +96,46 @@ def calculate_real_travel_distance(points: list, min_movement_m: float = 15.0, m
 
     return total_meters
 
+def filter_stationary_drift_loops(points: list, stop_threshold_s: float = 240.0, max_wander_m: float = 160.0) -> list:
+    """
+    Detects prolonged stationary stops (e.g. sitting at an office, customer site, or home for > 4 mins)
+    and removes false indoor GPS multipath drift / excursions that wander into adjacent lanes and return.
+    Eliminates artificial box/block driving loops around buildings.
+    """
+    if len(points) < 3:
+        return points
+
+    filtered = []
+    i = 0
+    n = len(points)
+    while i < n:
+        anchor = points[i]
+        j = i + 1
+        last_return = i
+        while j < n:
+            dist = haversine_distance_meters(anchor.latitude, anchor.longitude, points[j].latitude, points[j].longitude)
+            if dist <= 45.0:
+                last_return = j
+            elif dist > max_wander_m:
+                # Real vehicle or walking departure
+                break
+            j += 1
+
+        if points[last_return].recorded_at and points[i].recorded_at:
+            time_at_anchor = abs((points[last_return].recorded_at - points[i].recorded_at).total_seconds())
+        else:
+            time_at_anchor = 0.0
+
+        if time_at_anchor >= stop_threshold_s:
+            # Significant stop detected! Keep anchor point and skip false wander loops
+            filtered.append(anchor)
+            i = last_return
+        else:
+            filtered.append(points[i])
+        i += 1
+    return filtered
+
+
 def filter_clean_trajectory(points: list, min_movement_m: float = 15.0) -> list:
     """
     Filters out stationary GPS jitter and impossible teleports for smooth route playback.
@@ -103,10 +143,13 @@ def filter_clean_trajectory(points: list, min_movement_m: float = 15.0) -> list:
     if len(points) < 2:
         return points
 
-    # First filter out bad accuracy fixes (> 35m)
-    accurate_points = [p for p in points if (getattr(p, 'accuracy', None) is None or p.accuracy <= 35.0)]
+    # First eliminate indoor GPS multipath wander loops at stops
+    de_drifted = filter_stationary_drift_loops(points)
+
+    # Filter out bad accuracy fixes (> 35m)
+    accurate_points = [p for p in de_drifted if (getattr(p, 'accuracy', None) is None or p.accuracy <= 35.0)]
     if len(accurate_points) < 2:
-        accurate_points = points
+        accurate_points = de_drifted
 
     cleaned = [accurate_points[0]]
     for pt in accurate_points[1:]:

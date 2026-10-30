@@ -573,7 +573,7 @@ export default function RouteHistory() {
               ))}
 
               {/* Start Point Marker */}
-              {startPoint && (
+              {startPoint && history[0] && (
                 <Marker position={startPoint} icon={createStartIcon()}>
                   <Popup>
                     <div className="p-1 text-slate-900 font-semibold text-xs">
@@ -584,7 +584,7 @@ export default function RouteHistory() {
               )}
 
               {/* End Point Marker */}
-              {endPoint && (
+              {endPoint && history[history.length - 1] && (
                 <Marker position={endPoint} icon={createEndIcon()}>
                   <Popup>
                     <div className="p-1 text-slate-900 font-semibold text-xs">
