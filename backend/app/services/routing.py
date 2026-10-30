@@ -187,14 +187,55 @@ def _raw_segment(chunk: List[Dict[str, Any]]) -> Tuple[List[LatLng], float]:
     return line, dist
 
 
-def _merge_close_segments(segments: List[List[LatLng]]) -> List[List[LatLng]]:
-    merged: List[List[LatLng]] = []
-    for seg in segments:
-        if merged and haversine_m(merged[-1][-1], seg[0]) <= JOIN_DISTANCE_M:
-            merged[-1].extend(seg)
-        else:
-            merged.append(list(seg))
-    return merged
+def _connect_segments(
+    session: requests.Session,
+    segments: List[List[LatLng]],
+    profile: str,
+) -> Tuple[List[List[LatLng]], float]:
+    """
+    Connect consecutive road segments by routing along physical roadways between them
+    (Google Maps / Rapido style). Produces a continuous, unbroken highway line.
+    """
+    if not segments:
+        return [], 0.0
+
+    connected: List[LatLng] = list(segments[0])
+    extra_distance = 0.0
+
+    for i in range(1, len(segments)):
+        prev_end = connected[-1]
+        next_start = segments[i][0]
+        gap_m = haversine_m(prev_end, next_start)
+
+        # If already touching or very close, seamlessly stitch
+        if gap_m <= 25.0:
+            connected.extend(segments[i])
+            continue
+
+        # If gap exists (e.g. driver stopped, interval gap), route between endpoints
+        if gap_m <= 50000.0:
+            p1 = f"{prev_end[1]:.6f},{prev_end[0]:.6f}"
+            p2 = f"{next_start[1]:.6f},{next_start[0]:.6f}"
+            pair_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{p1};{p2}"
+            try:
+                r = session.get(pair_url, params={"geometries": "geojson", "overview": "full"}, timeout=REQUEST_TIMEOUT_S)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d.get("code") == "Ok" and d.get("routes"):
+                        rt = d["routes"][0]
+                        bridge_coords = [[lat, lng] for lng, lat in rt["geometry"]["coordinates"]]
+                        if len(bridge_coords) >= 2:
+                            connected.extend(bridge_coords[1:])
+                            connected.extend(segments[i])
+                            extra_distance += float(rt.get("distance") or 0.0)
+                            continue
+            except Exception:
+                pass
+
+        connected.extend(segments[i])
+
+    tot_dist = sum(haversine_m(connected[j - 1], connected[j]) for j in range(1, len(connected)))
+    return [connected], tot_dist
 
 
 def snap_trail(locations: list, profile: str = "driving") -> Dict[str, Any]:
@@ -251,10 +292,10 @@ def snap_trail(locations: list, profile: str = "driving") -> Dict[str, Any]:
             else:
                 segs, dist = result
                 all_segments.extend(segs)
-                total_distance += dist
 
-    segments = _merge_close_segments(all_segments)
-    flat = [pt for seg in segments for pt in seg]
+        segments, total_distance = _connect_segments(session, all_segments, profile)
+
+    flat = segments[0] if segments else []
     return {
         "segments": segments,
         "coordinates": flat,

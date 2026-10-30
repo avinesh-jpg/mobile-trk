@@ -531,17 +531,24 @@ export default function RouteHistory() {
             <>
               <AutoFitBounds positions={activePolyline} />
               
-              {/* Full Background Road Trail (Dark Blue Road Base) */}
+              {/* Google Maps Iconic Navigation Blue Route Trail */}
+              {/* Layer 1: Dark Blue Outer Border / Casing for crisp road contrast */}
               <Polyline
                 positions={activeSegments}
-                pathOptions={{ color: '#0369a1', weight: 6, opacity: 0.45 }}
+                pathOptions={{ color: '#1e40af', weight: 8, opacity: 0.85, lineCap: 'round', lineJoin: 'round' }}
               />
 
-              {/* Traveled Route Glow (Bright Cyan Traveled Trail) */}
+              {/* Layer 2: Vibrant Google Navigation Royal Blue Inner Core */}
+              <Polyline
+                positions={activeSegments}
+                pathOptions={{ color: '#2563eb', weight: 5, opacity: 1.0, lineCap: 'round', lineJoin: 'round' }}
+              />
+
+              {/* Traveled Route Glow (Bright Cyan Traveled Trail during Route Replay) */}
               {traveledSegments.length > 0 && (
                 <Polyline
                   positions={traveledSegments}
-                  pathOptions={{ color: '#06b6d4', weight: 5, opacity: 0.95 }}
+                  pathOptions={{ color: '#00f0ff', weight: 5, opacity: 1.0, lineCap: 'round', lineJoin: 'round' }}
                 />
               )}
 
