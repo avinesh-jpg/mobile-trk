@@ -78,6 +78,7 @@ import com.example.geotrack.ui.theme.TextPrimary
 import com.example.geotrack.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Calendar
 
 @Composable
 fun TrackingScreen(
@@ -98,6 +99,8 @@ fun TrackingScreen(
     var isGpsHardwareEnabled by remember { mutableStateOf(isDeviceLocationEnabled(context)) }
     var showPermissionRationaleDialog by remember { mutableStateOf(false) }
     var showGpsDisabledDialog by remember { mutableStateOf(false) }
+    var showShiftAutoEndedDialog by remember { mutableStateOf(false) }
+    var showAfterHoursDialog by remember { mutableStateOf(false) }
     var startShiftPending by remember { mutableStateOf(false) }
 
     // Re-verify permission, GPS state, and sync offline points when app returns to foreground
@@ -143,10 +146,18 @@ fun TrackingScreen(
         locationPermissionLauncher.launch(permissions.toTypedArray())
     }
 
-    // Elapsed Time Tick
+    // Elapsed Time Tick & 8:00 PM Auto Shift End
     var elapsedSeconds by remember { mutableLongStateOf(0L) }
     LaunchedEffect(isShiftActive, shiftStartTime) {
         while (isShiftActive) {
+            val cal = Calendar.getInstance()
+            val currentHour = cal.get(Calendar.HOUR_OF_DAY)
+            if (currentHour >= 20 || currentHour < 6) {
+                LocationTrackingService.stopService(context)
+                trackingRepository.endShift()
+                showShiftAutoEndedDialog = true
+                break
+            }
             elapsedSeconds = trackingRepository.getActiveElapsedSeconds()
             delay(1000)
         }
@@ -327,7 +338,11 @@ fun TrackingScreen(
                         }
                     } else {
                         // Start Shift
-                        if (!hasLocationPermission) {
+                        val cal = Calendar.getInstance()
+                        val currentHour = cal.get(Calendar.HOUR_OF_DAY)
+                        if (currentHour >= 20 || currentHour < 6) {
+                            showAfterHoursDialog = true
+                        } else if (!hasLocationPermission) {
                             startShiftPending = true
                             showPermissionRationaleDialog = true
                         } else if (!isDeviceLocationEnabled(context)) {
@@ -433,6 +448,62 @@ fun TrackingScreen(
                     Text("Dismiss", color = TextMuted)
                 }
             }
+        )
+    }
+
+    // 8:00 PM Auto Shift End Alert & App Exit
+    if (showShiftAutoEndedDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                (context as? android.app.Activity)?.finishAffinity()
+            },
+            title = {
+                Text(text = "Shift Ended Automatically", fontWeight = FontWeight.Bold, color = Color.White)
+            },
+            text = {
+                Text(
+                    text = "It is 8:00 PM. Your shift has ended for today, GPS tracking has turned off, and the app will now close.",
+                    color = TextSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        (context as? android.app.Activity)?.finishAffinity()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+                ) {
+                    Text("Close App", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            containerColor = DarkSurface
+        )
+    }
+
+    // After-Hours Shift Start Restriction Dialog
+    if (showAfterHoursDialog) {
+        AlertDialog(
+            onDismissRequest = { showAfterHoursDialog = false },
+            title = {
+                Text(text = "Shift Hours Closed", fontWeight = FontWeight.Bold, color = Color.White)
+            },
+            text = {
+                Text(
+                    text = "Shift hours end automatically at 8:00 PM. Tracking cannot be started until tomorrow morning (6:00 AM).",
+                    color = TextSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showAfterHoursDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+                ) {
+                    Text("OK", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            containerColor = DarkSurface
         )
     }
 }

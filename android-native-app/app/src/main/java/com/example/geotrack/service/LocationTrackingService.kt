@@ -29,6 +29,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.Calendar
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -165,6 +166,16 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
         heartbeatJob = serviceScope.launch {
             while (isActive) {
                 delay(12000)
+                val cal = Calendar.getInstance()
+                val hour = cal.get(Calendar.HOUR_OF_DAY)
+                if (hour >= 20 || hour < 6) {
+                    try {
+                        GeoTrackApp.instance.trackingRepository.endShift()
+                    } catch (_: Exception) {}
+                    stopTrackingService()
+                    break
+                }
+
                 val now = System.currentTimeMillis()
                 // If no update from OS listener in 12s, emit heartbeat with best available position
                 if (now - lastRecordedPingTime >= 10000) {
@@ -209,6 +220,18 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     private fun dispatchLocationPing(location: Location) {
+        val cal = Calendar.getInstance()
+        val hour = cal.get(Calendar.HOUR_OF_DAY)
+        if (hour >= 20 || hour < 6) {
+            serviceScope.launch {
+                try {
+                    GeoTrackApp.instance.trackingRepository.endShift()
+                } catch (_: Exception) {}
+                stopTrackingService()
+            }
+            return
+        }
+
         val now = System.currentTimeMillis()
         if (now - lastRecordedPingTime < 8000) return
         lastRecordedPingTime = now
