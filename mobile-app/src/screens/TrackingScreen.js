@@ -5,6 +5,7 @@ import {
   View,
   TouchableOpacity,
   Alert,
+  BackHandler,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
@@ -52,7 +53,35 @@ export default function TrackingScreen({ user, onLogout }) {
     });
     Accelerometer.setUpdateInterval(10000); // 10 seconds check to preserve battery
 
+    // Auto-check for 8:00 PM cutoff while app is open in foreground
+    const cutoffInterval = setInterval(() => {
+      const now = new Date();
+      const hour = now.getHours();
+
+      if (hour >= 20 || hour < 6) {
+        AsyncStorage.getItem('shift_active').then((active) => {
+          if (active === 'true') {
+            stopTracking();
+            Alert.alert(
+              'Shift Complete',
+              'It is 8:00 PM. Your shift has ended, GPS is turned off, and the app will now close.',
+              [
+                {
+                  text: 'OK',
+                  onPress: () => {
+                    BackHandler.exitApp();
+                  },
+                },
+              ],
+              { cancelable: false }
+            );
+          }
+        });
+      }
+    }, 30000); // Check every 30 seconds
+
     return () => {
+      clearInterval(cutoffInterval);
       sensorSub.remove();
       if (foregroundWatcher.current) {
         foregroundWatcher.current.remove();
@@ -105,6 +134,19 @@ export default function TrackingScreen({ user, onLogout }) {
 
   const startTracking = async (isResuming = false) => {
     try {
+      // Prevent starting shift after 8:00 PM
+      const now = new Date();
+      const hour = now.getHours();
+      if (hour >= 20 || hour < 6) {
+        if (!isResuming) {
+          Alert.alert(
+            'Shift Hours Closed',
+            'Shift hours end automatically at 8:00 PM. Tracking cannot be started until tomorrow morning (6:00 AM).'
+          );
+        }
+        return;
+      }
+
       const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
       if (fgStatus !== 'granted') {
         if (!isResuming) {

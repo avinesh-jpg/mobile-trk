@@ -44,7 +44,17 @@ async def ingest_location_ping(
     # Enforce stationary speed threshold: micro-jitter under 2 km/h while still is 0 km/h
     reported_speed = ping.speed or 0.0
     act_type = ping.activity_type or "unknown"
-    if act_type == "still" or reported_speed < 2.0:
+
+    # Enforce automatic 8:00 PM IST cutoff
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist_tz)
+    is_after_hours = (now_ist.hour >= 20 or now_ist.hour < 6)
+
+    if is_after_hours:
+        clean_speed = 0.0
+        clean_moving = False
+        act_type = "shift_ended"
+    elif act_type == "still" or reported_speed < 2.0:
         clean_speed = 0.0
         clean_moving = False
         act_type = "still"
@@ -179,6 +189,9 @@ def get_all_latest_locations(
     """
     employees = db.query(User).filter(User.role == "employee").all()
     now_utc = datetime.now(timezone.utc)
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist_tz)
+    is_after_hours = (now_ist.hour >= 20 or now_ist.hour < 6)
     results = []
 
     for emp in employees:
@@ -189,25 +202,23 @@ def get_all_latest_locations(
             .first()
         )
         
-        # Consider online only if pinged within last 5 minutes AND not shift_ended
+        # Consider online only if pinged within last 5 minutes AND not shift_ended AND not past 8:00 PM cutoff
         is_online = False
         latest_loc_out = None
         if last_loc and last_loc.recorded_at:
             delta = (now_utc - last_loc.recorded_at).total_seconds()
-            if delta <= 300 and last_loc.activity_type != "shift_ended":
+            if delta <= 300 and last_loc.activity_type != "shift_ended" and not is_after_hours:
                 is_online = True
             
-            # If no updates for > 75 seconds, person is stationary (speed = 0)
+            # If no updates for > 75 seconds or after hours, person is stationary (speed = 0)
             loc_data = LocationOut.model_validate(last_loc)
-            if delta > 75 and is_online:
+            if (delta > 75 or is_after_hours) and is_online:
                 loc_data.speed = 0.0
                 loc_data.is_moving = False
                 loc_data.activity_type = "still"
             latest_loc_out = loc_data
 
         # Calculate employee's distance today in IST (resets daily at 00:00 IST)
-        ist_tz = timezone(timedelta(hours=5, minutes=30))
-        now_ist = datetime.now(ist_tz)
         start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
         start_of_today = start_of_today_ist.astimezone(timezone.utc)
 
