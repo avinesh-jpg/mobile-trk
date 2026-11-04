@@ -4,7 +4,7 @@ import { DEFAULT_API_HOST } from '../config';
 
 const api = axios.create({
   baseURL: DEFAULT_API_HOST,
-  timeout: 10000,
+  timeout: 35000,
   headers: {
     'Content-Type': 'application/json',
   },

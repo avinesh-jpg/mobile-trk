@@ -145,7 +145,20 @@ class TrackingRepository(
         )
         localDataSource.insertOrUpdateShift(record)
         updateCounts()
-        scope.launch { syncOfflineLocations() }
+        scope.launch {
+            // Wake up Render server asynchronously with cold-start tolerance
+            try {
+                val host = authRepository.serverHost.value
+                val rootUrl = if (host.endsWith("/api/v1")) host.removeSuffix("/api/v1") + "/" else "$host/"
+                val conn = (URL(rootUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 35000
+                    readTimeout = 35000
+                }
+                conn.responseCode
+            } catch (_: Exception) {}
+            syncOfflineLocations()
+        }
         shiftId
     }
 
@@ -225,8 +238,8 @@ class TrackingRepository(
                 if (!user?.token.isNullOrEmpty()) {
                     setRequestProperty("Authorization", "Bearer ${user?.token}")
                 }
-                connectTimeout = 6000
-                readTimeout = 6000
+                connectTimeout = 25000
+                readTimeout = 25000
                 doOutput = false
             }
             conn.responseCode
@@ -329,8 +342,8 @@ class TrackingRepository(
                 if (!user?.token.isNullOrEmpty()) {
                     setRequestProperty("Authorization", "Bearer ${user?.token}")
                 }
-                connectTimeout = 8000
-                readTimeout = 8000
+                connectTimeout = 35000
+                readTimeout = 35000
                 doOutput = true
             }
 
@@ -376,8 +389,8 @@ class TrackingRepository(
                 if (!user?.token.isNullOrEmpty()) {
                     setRequestProperty("Authorization", "Bearer ${user?.token}")
                 }
-                connectTimeout = 12000
-                readTimeout = 12000
+                connectTimeout = 35000
+                readTimeout = 35000
                 doOutput = true
             }
 
