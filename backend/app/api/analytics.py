@@ -8,6 +8,14 @@ from app.db.models import User, Location, Geofence, DetectedVisit
 from app.ml.clustering import detect_stay_points, match_visit_to_geofence
 from app.ml.anomaly import haversine_distance_meters, calculate_real_travel_distance
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def to_ist(dt: datetime) -> datetime:
+    """Ensure datetime is converted to India Standard Time (IST)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
+
 router = APIRouter(prefix="/analytics", tags=["ML & AI Analytics"])
 
 @router.post("/detect-stops/{user_id}")
@@ -115,8 +123,8 @@ def generate_ai_field_summary(
     # Calculate real physical travel distance (filtering indoor GPS micro-drift)
     total_distance_m = calculate_real_travel_distance(points, min_movement_m=25.0, min_speed_kmh=2.5)
     total_km = round(total_distance_m / 1000.0, 2)
-    first_ping = points[0].recorded_at.strftime("%I:%M %p")
-    last_ping = points[-1].recorded_at.strftime("%I:%M %p")
+    first_ping = to_ist(points[0].recorded_at).strftime("%I:%M %p")
+    last_ping = to_ist(points[-1].recorded_at).strftime("%I:%M %p")
     spoofed_count = sum(1 for p in points if p.is_mock)
 
     # Fetch detected visits
@@ -220,10 +228,10 @@ def export_timesheet(
             .all()
         )
 
-        # Group points by date string (YYYY-MM-DD)
+        # Group points by date string in IST (YYYY-MM-DD)
         daily_groups = {}
         for p in points:
-            d_str = p.recorded_at.strftime("%Y-%m-%d")
+            d_str = to_ist(p.recorded_at).strftime("%Y-%m-%d")
             if d_str not in daily_groups:
                 daily_groups[d_str] = []
             daily_groups[d_str].append(p)
@@ -261,8 +269,8 @@ def export_timesheet(
                 "employee_id": emp.id,
                 "employee_name": emp.name,
                 "employee_email": emp.email,
-                "shift_start": first_pt.recorded_at.strftime("%I:%M %p"),
-                "shift_end": last_pt.recorded_at.strftime("%I:%M %p"),
+                "shift_start": to_ist(first_pt.recorded_at).strftime("%I:%M %p"),
+                "shift_end": to_ist(last_pt.recorded_at).strftime("%I:%M %p"),
                 "total_duration": shift_hours_str,
                 "duration_minutes": shift_minutes,
                 "total_distance_km": day_km,
