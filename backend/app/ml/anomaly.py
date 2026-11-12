@@ -71,6 +71,13 @@ def calculate_real_travel_distance(points: list, min_movement_m: float = 15.0, m
             pt.latitude, pt.longitude
         )
 
+        # Do not bridge distance across an ended shift
+        last_act = getattr(last_valid_point, 'activity_type', '') or ''
+        curr_act = getattr(pt, 'activity_type', '') or ''
+        if last_act == 'shift_ended' or curr_act == 'shift_started':
+            last_valid_point = pt
+            continue
+
         # Velocity check: Calculate real velocity between consecutive fixes
         if pt.recorded_at and last_valid_point.recorded_at:
             time_diff = abs((pt.recorded_at - last_valid_point.recorded_at).total_seconds())
