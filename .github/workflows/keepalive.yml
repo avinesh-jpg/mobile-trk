@@ -2,9 +2,9 @@ name: Render Backend Workday Keep-Alive
 
 on:
   schedule:
-    # Runs every 14 minutes between 03:00 UTC (8:30 AM IST) and 14:30 UTC (8:00 PM IST)
+    # Runs every 10 minutes between 02:00 UTC (7:30 AM IST) and 15:30 UTC (9:00 PM IST)
     # This prevents Render free-tier from sleeping during the working day.
-    - cron: '*/14 3-14 * * *'
+    - cron: '*/10 2-15 * * *'
   workflow_dispatch:
 
 jobs:

@@ -12,6 +12,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 class AuthRepository(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("geotrack_auth_prefs", Context.MODE_PRIVATE)
@@ -26,6 +28,31 @@ class AuthRepository(context: Context) {
 
     private val _isOfflineMode = MutableStateFlow(prefs.getBoolean("is_offline_mode", false))
     val isOfflineMode: StateFlow<Boolean> = _isOfflineMode.asStateFlow()
+
+    init {
+        // Purge any stale dummy offline token if left behind from previous bugs
+        val saved = _currentUser.value
+        if (saved != null && (saved.token.startsWith("offline_jwt_token") || saved.token.isBlank())) {
+            logout()
+        }
+        // Immediately ping cloud backend on app start to wake it from cold sleep
+        wakeUpServer()
+    }
+
+    fun wakeUpServer() {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val host = _serverHost.value
+                val rootUrl = if (host.contains("/api/v1")) host.substringBefore("/api/v1") + "/" else "$host/"
+                val conn = (URL(rootUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 15000
+                    readTimeout = 15000
+                }
+                conn.responseCode
+            } catch (_: Exception) {}
+        }
+    }
 
     fun setServerHost(host: String) {
         val cleanHost = host.trim().removeSuffix("/")
@@ -65,19 +92,22 @@ class AuthRepository(context: Context) {
 
         var serverFailureReason: String? = null
 
-        // 1. Check if user already logged in previously on this device with matching email
+        // 1. Check if user already logged in previously on this device with a valid real token
         val cachedUser = _currentUser.value
-        val hasMatchingCache = cachedUser != null && cachedUser.email.equals(email, ignoreCase = true)
+        val hasMatchingCache = cachedUser != null &&
+                cachedUser.email.equals(email, ignoreCase = true) &&
+                cachedUser.token.isNotBlank() &&
+                !cachedUser.token.startsWith("offline_jwt_token")
 
         try {
-            // Attempt real backend authentication with a generous 18s timeout for cloud cold starts
+            // Attempt real backend authentication with a 45s timeout for cloud cold starts
             val loginUrl = URL("$host/auth/login")
             val conn = (loginUrl.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
-                connectTimeout = 18000
-                readTimeout = 18000
+                connectTimeout = 45000
+                readTimeout = 45000
                 doOutput = true
             }
 
@@ -119,29 +149,21 @@ class AuthRepository(context: Context) {
             serverFailureReason = netEx.localizedMessage ?: "Network connection error"
         }
 
-        // 2. If device is offline but driver previously logged in, allow them to resume shift offline
+        // 2. If device is offline but driver previously logged in with a verified real token, allow offline resume
         if (hasMatchingCache && cachedUser != null) {
             _isOfflineMode.value = true
             return@withContext Result.success(cachedUser)
         }
 
-        // 3. If driver has never logged in and network is unavailable, derive their real name from email (never Alex Mercer)
-        if (email.isNotBlank() && pass.isNotBlank()) {
-            val formattedName = email.substringBefore("@").replace(".", " ").split(" ")
-                .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
-            val fallbackUser = User(
-                id = "emp_offline",
-                name = formattedName.ifEmpty { "Field Driver" },
-                email = email,
-                role = if (email.contains("admin")) "admin" else "employee",
-                token = "offline_jwt_token_${System.currentTimeMillis()}",
-                serverHost = host
-            )
-            saveUser(fallbackUser, isOffline = true)
-            Result.success(fallbackUser)
+        // 3. DO NOT generate dummy offline token. Return informative message if server was sleeping
+        val userFriendlyMsg = if (serverFailureReason?.contains("timeout", ignoreCase = true) == true ||
+            serverFailureReason?.contains("timed out", ignoreCase = true) == true ||
+            serverFailureReason?.contains("connect", ignoreCase = true) == true) {
+            "Cloud server is starting up. Please wait 15 seconds and tap Sign In again."
         } else {
-            Result.failure(Exception(serverFailureReason ?: "Unable to connect to server. Please check your internet."))
+            serverFailureReason ?: "Unable to connect to server. Please check your internet connection."
         }
+        Result.failure(Exception(userFriendlyMsg))
     }
 
     fun logout() {
