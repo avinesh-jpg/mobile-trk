@@ -288,6 +288,12 @@ async def snap_to_roads_hmm(
 
     async with httpx.AsyncClient(timeout=12.0) as client:
         for chunk in chunks:
+            kalman_pts = [[p["latitude"], p["longitude"]] for p in chunk]
+            direct_dist = sum(
+                haversine_m(kalman_pts[j - 1], kalman_pts[j])
+                for j in range(1, len(kalman_pts))
+            )
+
             coords = ";".join(f"{p['longitude']:.6f},{p['latitude']:.6f}" for p in chunk)
             
             clean_ts: List[int] = []
@@ -299,13 +305,14 @@ async def snap_to_roads_hmm(
                 clean_ts.append(t)
                 last_t = t
 
-            radiuses = ";".join(str(max(10, min(int(p.get("accuracy", 15)), 35))) for p in chunk)
+            # Snapping radius (25 to 40 meters) to handle highway medians smoothly
+            radiuses = ";".join(str(max(20, min(int(p.get("accuracy", 20)), 40))) for p in chunk)
             timestamps = ";".join(str(t) for t in clean_ts)
 
             chunk_pts: List[List[float]] = []
             chunk_dist = 0.0
 
-            # 1. Attempt OSRM Map Matching
+            # 1. Attempt OSRM Map Matching with timestamps & radiuses
             match_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/match/v1/{profile}/{coords}"
             match_params = {
                 "geometries": "polyline6",
@@ -320,34 +327,57 @@ async def snap_to_roads_hmm(
                 if r.status_code == 200:
                     d = r.json()
                     if d.get("code") == "Ok" and d.get("matchings"):
+                        candidate_pts: List[List[float]] = []
+                        candidate_dist = 0.0
                         for m in d["matchings"]:
                             pts = polyline.decode(m["geometry"], 6)
-                            chunk_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
-                            chunk_dist += float(m.get("distance", 0.0) or 0.0)
-                        matched_chunks += 1
+                            candidate_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
+                            candidate_dist += float(m.get("distance", 0.0) or 0.0)
+
+                        # Anti-detour validation:
+                        # Ensure matched distance does not exceed 1.7x direct distance or create huge loop
+                        if direct_dist <= 25.0 or candidate_dist <= max(direct_dist * 1.7, direct_dist + 150.0):
+                            chunk_pts = candidate_pts
+                            chunk_dist = candidate_dist
+                            matched_chunks += 1
             except Exception:
                 pass
 
-            # 2. If /match fails, snap this chunk via physical road network (/route)
+            # 2. If timestamped match was rejected or failed, try pure geometric match (without timestamps/radiuses)
             if not chunk_pts:
                 try:
-                    route_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{coords}"
-                    r2 = await client.get(route_url, params={"overview": "full", "geometries": "polyline6"})
-                    if r2.status_code == 200:
-                        d2 = r2.json()
-                        if d2.get("code") == "Ok" and d2.get("routes"):
-                            rt = d2["routes"][0]
-                            pts = polyline.decode(rt["geometry"], 6)
-                            chunk_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
-                            chunk_dist += float(rt.get("distance", 0.0) or 0.0)
-                            matched_chunks += 1
+                    r_geom = await client.get(match_url, params={
+                        "geometries": "polyline6",
+                        "overview": "full",
+                        "gaps": "ignore",
+                        "tidy": "true"
+                    })
+                    if r_geom.status_code == 200:
+                        d_geom = r_geom.json()
+                        if d_geom.get("code") == "Ok" and d_geom.get("matchings"):
+                            candidate_pts = []
+                            candidate_dist = 0.0
+                            for m in d_geom["matchings"]:
+                                pts = polyline.decode(m["geometry"], 6)
+                                candidate_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
+                                candidate_dist += float(m.get("distance", 0.0) or 0.0)
+
+                            if direct_dist <= 25.0 or candidate_dist <= max(direct_dist * 1.7, direct_dist + 150.0):
+                                chunk_pts = candidate_pts
+                                chunk_dist = candidate_dist
+                                matched_chunks += 1
                 except Exception:
                     pass
 
-            # 3. Fallback to raw Kalman points if network was completely unavailable
+            # 3. Clean Fallback to Kalman Filtered Coordinates
+            # When road matching is unavailable or returns an artificial one-way detour loop,
+            # use the clean Kalman-filtered GPS coordinates!
+            # The Kalman filter has already removed micro-jitter and indoor noise,
+            # so it stays strictly on the highway (NH 381) without taking fake loops through
+            # residential neighborhoods, parallel alleys, or opposite-side carriageways.
             if not chunk_pts:
-                chunk_pts = [[p["latitude"], p["longitude"]] for p in chunk]
-                chunk_dist = sum(haversine_m(chunk_pts[j-1], chunk_pts[j]) for j in range(1, len(chunk_pts)))
+                chunk_pts = kalman_pts
+                chunk_dist = direct_dist
 
             # Append smoothly without duplicate joint point
             if not snapped_path:
