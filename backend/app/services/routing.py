@@ -14,7 +14,7 @@ import polyline
 from app.core.config import settings
 
 VALID_PROFILES = {"driving", "walking", "cycling"}
-CHUNK_SIZE = 80          # OSRM HMM map-matching batch size
+CHUNK_SIZE = 8          # OSRM public demo server limits /match to 10 points
 CHUNK_OVERLAP = 1       # Shared boundary point between chunks
 MAX_SPEED_M_S = 38.0    # 38 m/s = ~136.8 km/h velocity limit
 MAX_ACCURACY_M = 25.0   # Reject fixes with horizontal accuracy > 25m
@@ -131,7 +131,7 @@ class GPSKalmanFilter2D:
         meters_to_deg = 1.0 / 111320.0
         acc_deg = max(initial_accuracy, 3.0) * meters_to_deg
         self.P = np.diag([acc_deg**2, acc_deg**2, 1e-4, 1e-4])
-        self.sigma_a = 1.2 * meters_to_deg  # process acceleration standard deviation
+        self.sigma_a = 1.2 * meters_to_deg
         self.last_ts: Optional[float] = None
 
     def update(self, lat: float, lon: float, accuracy: float, timestamp_sec: float) -> Tuple[float, float]:
@@ -216,7 +216,6 @@ def apply_kalman_filter(clean_pings: List[Any]) -> List[Dict[str, Any]]:
 
         s_lat, s_lon = kf.update(lat, lon, acc, ts)
         
-        # ISO string formatting for frontend
         rec_at = _get_val(ping, 'recorded_at', 'timestamp')
         if isinstance(rec_at, datetime):
             iso_time = rec_at.isoformat()
@@ -237,83 +236,14 @@ def apply_kalman_filter(clean_pings: List[Any]) -> List[Dict[str, Any]]:
     return smoothed
 
 
-async def _match_osrm_chunk(
-    client: httpx.AsyncClient,
-    chunk: List[Dict[str, Any]],
-    profile: str = "driving"
-) -> Tuple[List[List[float]], float, float]:
-    """
-    Query OSRM HMM map-matching for a single chunk of up to 80 points.
-    Returns: (snapped_coords, distance_meters, confidence_0_to_1)
-    Falls back to Kalman coordinates if unmatchable or off-road.
-    """
-    fallback_coords = [[p["latitude"], p["longitude"]] for p in chunk]
-    if len(chunk) < 2:
-        return fallback_coords, 0.0, 0.0
-
-    # OSRM expects: longitude,latitude;...
-    coords_str = ";".join(f"{p['longitude']:.6f},{p['latitude']:.6f}" for p in chunk)
-    
-    # Ensure strictly increasing timestamps
-    clean_ts: List[int] = []
-    last_t = -1
-    for p in chunk:
-        t = int(p.get("timestamp", 0))
-        if t <= last_t:
-            t = last_t + 1
-        clean_ts.append(t)
-        last_t = t
-
-    radiuses = ";".join(str(max(10, min(int(p.get("accuracy", 15)), 40))) for p in chunk)
-    timestamps = ";".join(str(t) for t in clean_ts)
-
-    url = f"{settings.OSRM_BASE_URL.rstrip('/')}/match/v1/{profile}/{coords_str}"
-    params = {
-        "geometries": "polyline6",
-        "overview": "full",
-        "gaps": "ignore",
-        "tidy": "true",
-        "timestamps": timestamps,
-        "radiuses": radiuses
-    }
-
-    try:
-        resp = await client.get(url, params=params, timeout=12.0)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("code") == "Ok" and data.get("matchings"):
-                matched_points: List[List[float]] = []
-                total_dist = 0.0
-                confidences: List[float] = []
-
-                for m in data["matchings"]:
-                    geom_str = m.get("geometry", "")
-                    if geom_str:
-                        decoded = polyline.decode(geom_str, 6)
-                        # polyline returns [(lat, lon), ...]
-                        matched_points.extend([[round(lat, 6), round(lon, 6)] for lat, lon in decoded])
-                    total_dist += float(m.get("distance", 0.0) or 0.0)
-                    confidences.append(float(m.get("confidence", 0.0) or 0.0))
-
-                if matched_points:
-                    avg_conf = sum(confidences) / max(len(confidences), 1)
-                    return matched_points, total_dist, avg_conf
-    except Exception:
-        pass
-
-    # Fallback to Kalman points if OSRM is unreachable or chunk is off-road
-    fallback_dist = sum(haversine_m(fallback_coords[i - 1], fallback_coords[i]) for i in range(1, len(fallback_coords)))
-    return fallback_coords, fallback_dist, 0.5
-
-
 async def snap_to_roads_hmm(
     pings: List[Dict[str, Any]],
     profile: str = "driving"
 ) -> Tuple[List[List[float]], float, float]:
     """
-    Chunk smoothed GPS pings into 80-point batches with 1-point overlap,
-    snap onto real street geometry using OSRM HMM engine,
-    and fall back to Kalman-smoothed points if unreachable.
+    Downsamples stationary micro-jitter, batches into chunks of 8 points
+    (matching OSRM's 10-point limit), snaps onto physical roads using
+    OSRM /match with fallback to /route on real streets.
     Returns: (snapped_path, total_distance_km, map_match_confidence_pct)
     """
     if not pings:
@@ -323,50 +253,118 @@ async def snap_to_roads_hmm(
     if len(pings) < 2:
         return raw_kalman_path, 0.0, 100.0
 
-    # Build overlapping chunks of up to 80 points
+    # 1. Downsample stationary micro-jitter (< 12 meters apart when still)
+    motion_pings = [pings[0]]
+    for p in pings[1:]:
+        dist_prev = haversine_m(
+            [motion_pings[-1]["latitude"], motion_pings[-1]["longitude"]],
+            [p["latitude"], p["longitude"]]
+        )
+        if dist_prev >= 12.0 or (p.get("speed") or 0.0) > 3.0:
+            motion_pings.append(p)
+    if motion_pings[-1] != pings[-1]:
+        motion_pings.append(pings[-1])
+
+    # 2. Build chunks of up to 8 points (OSRM /match has a hard limit of 10 points)
+    chunk_size = CHUNK_SIZE
+    step = chunk_size - CHUNK_OVERLAP
     chunks: List[List[Dict[str, Any]]] = []
-    step = CHUNK_SIZE - CHUNK_OVERLAP
     i = 0
-    n = len(pings)
+    n = len(motion_pings)
     while i < n:
-        chunk = pings[i : i + CHUNK_SIZE]
+        chunk = motion_pings[i : i + chunk_size]
         if len(chunk) >= 2:
             chunks.append(chunk)
         elif chunks:
-            # Append trailing single point to previous chunk
             chunks[-1].append(chunk[0])
         i += step
 
     if not chunks:
-        chunks = [pings]
+        chunks = [motion_pings]
 
     snapped_path: List[List[float]] = []
     total_distance_m = 0.0
-    confidences: List[float] = []
+    matched_chunks = 0
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for idx, chunk in enumerate(chunks):
-            chunk_pts, chunk_dist, chunk_conf = await _match_osrm_chunk(client, chunk, profile=profile)
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        for chunk in chunks:
+            coords = ";".join(f"{p['longitude']:.6f},{p['latitude']:.6f}" for p in chunk)
+            
+            clean_ts: List[int] = []
+            last_t = -1
+            for p in chunk:
+                t = int(p.get("timestamp", 0))
+                if t <= last_t:
+                    t = last_t + 1
+                clean_ts.append(t)
+                last_t = t
+
+            radiuses = ";".join(str(max(10, min(int(p.get("accuracy", 15)), 35))) for p in chunk)
+            timestamps = ";".join(str(t) for t in clean_ts)
+
+            chunk_pts: List[List[float]] = []
+            chunk_dist = 0.0
+
+            # 1. Attempt OSRM Map Matching
+            match_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/match/v1/{profile}/{coords}"
+            match_params = {
+                "geometries": "polyline6",
+                "overview": "full",
+                "gaps": "ignore",
+                "tidy": "true",
+                "timestamps": timestamps,
+                "radiuses": radiuses
+            }
+            try:
+                r = await client.get(match_url, params=match_params)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d.get("code") == "Ok" and d.get("matchings"):
+                        for m in d["matchings"]:
+                            pts = polyline.decode(m["geometry"], 6)
+                            chunk_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
+                            chunk_dist += float(m.get("distance", 0.0) or 0.0)
+                        matched_chunks += 1
+            except Exception:
+                pass
+
+            # 2. If /match fails, snap this chunk via physical road network (/route)
+            if not chunk_pts:
+                try:
+                    route_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{coords}"
+                    r2 = await client.get(route_url, params={"overview": "full", "geometries": "polyline6"})
+                    if r2.status_code == 200:
+                        d2 = r2.json()
+                        if d2.get("code") == "Ok" and d2.get("routes"):
+                            rt = d2["routes"][0]
+                            pts = polyline.decode(rt["geometry"], 6)
+                            chunk_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
+                            chunk_dist += float(rt.get("distance", 0.0) or 0.0)
+                            matched_chunks += 1
+                except Exception:
+                    pass
+
+            # 3. Fallback to raw Kalman points if network was completely unavailable
+            if not chunk_pts:
+                chunk_pts = [[p["latitude"], p["longitude"]] for p in chunk]
+                chunk_dist = sum(haversine_m(chunk_pts[j-1], chunk_pts[j]) for j in range(1, len(chunk_pts)))
+
+            # Append smoothly without duplicate joint point
             if not snapped_path:
                 snapped_path.extend(chunk_pts)
             else:
-                # Avoid duplicate point at chunk junction
                 if chunk_pts:
-                    if haversine_m(snapped_path[-1], chunk_pts[0]) < 2.0:
+                    if haversine_m(snapped_path[-1], chunk_pts[0]) < 5.0:
                         snapped_path.extend(chunk_pts[1:])
                     else:
                         snapped_path.extend(chunk_pts)
             total_distance_m += chunk_dist
-            confidences.append(chunk_conf)
 
-    # Calculate actual path distance
     if not total_distance_m and len(snapped_path) >= 2:
         total_distance_m = sum(haversine_m(snapped_path[j - 1], snapped_path[j]) for j in range(1, len(snapped_path)))
 
     total_dist_km = total_distance_m / 1000.0
-    avg_conf = (sum(confidences) / max(len(confidences), 1)) if confidences else 0.5
-    # Normalize confidence to clean percentage (0 - 100%)
-    confidence_pct = round(min(100.0, max(20.0, avg_conf * 100.0 if avg_conf < 1.0 else avg_conf)), 1)
+    confidence_pct = round((matched_chunks / max(len(chunks), 1)) * 100.0, 1)
 
     return snapped_path, total_dist_km, confidence_pct
 
@@ -377,13 +375,6 @@ async def process_staff_route(
 ) -> Dict[str, Any]:
     """
     End-to-end AI Denoising, Kalman Filtering and HMM Road-Snapping pipeline.
-    Exposes:
-      - raw_count: int
-      - clean_count: int
-      - denoised_pings: List[Dict]
-      - road_snapped_path: List[[lat, lon]]
-      - total_distance_km: float (2 decimal places)
-      - map_match_confidence: float (0.0 - 100.0%)
     """
     raw_count = len(raw_pings)
 
@@ -404,7 +395,7 @@ async def process_staff_route(
     # 2. 2D Kalman Filter Smoothing
     denoised_pings = apply_kalman_filter(clean_pings)
 
-    # 3. HMM Road-Snapping via OSRM /match/v1/driving/
+    # 3. HMM Road-Snapping via OSRM (with 8-point batches and /route fallback)
     road_snapped_path, total_dist_km, confidence = await snap_to_roads_hmm(
         denoised_pings, profile=profile
     )
@@ -419,7 +410,6 @@ async def process_staff_route(
     }
 
 
-# Backward-compatibility alias for existing code
 def snap_trail(locations: list, profile: str = "driving") -> Dict[str, Any]:
     """Synchronous bridge for existing callers."""
     clean = filter_and_sort_pings(locations)
