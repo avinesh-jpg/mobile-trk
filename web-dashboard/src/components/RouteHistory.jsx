@@ -71,7 +71,7 @@ export default function RouteHistory() {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [loading, setLoading] = useState(false);
   const [mapStyle, setMapStyle] = useState('google-hybrid');
-  const [profile, setProfile] = useState('driving');
+  const profile = 'driving';
   const [snapToRoads, setSnapToRoads] = useState(true);
 
   // Backend AI Road-Snapping response state
@@ -151,7 +151,7 @@ export default function RouteHistory() {
     if (selectedUser) {
       fetchRoute();
     }
-  }, [selectedUser, date, profile]);
+  }, [selectedUser, date]);
 
   const handleClearHistory = async () => {
     if (!selectedUser) return;
@@ -256,19 +256,6 @@ export default function RouteHistory() {
               onChange={(e) => setDate(e.target.value)}
               className="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500 cursor-pointer"
             />
-          </div>
-
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-400 uppercase mb-1">Profile</label>
-            <select
-              value={profile}
-              onChange={(e) => setProfile(e.target.value)}
-              className="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-cyan-500 cursor-pointer"
-            >
-              <option value="driving">🚗 Driving</option>
-              <option value="walking">🚶 Walking</option>
-              <option value="cycling">🚲 Cycling</option>
-            </select>
           </div>
 
           <div className="flex items-center gap-2 mt-5">
