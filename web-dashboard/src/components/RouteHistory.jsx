@@ -72,6 +72,7 @@ export default function RouteHistory() {
   const [loading, setLoading] = useState(false);
   const [mapStyle, setMapStyle] = useState('google-hybrid');
   const [profile, setProfile] = useState('driving');
+  const [snapToRoads, setSnapToRoads] = useState(true);
 
   // Backend AI Road-Snapping response state
   const [rawCount, setRawCount] = useState(0);
@@ -171,8 +172,8 @@ export default function RouteHistory() {
     }
   };
 
-  // Active path to draw on map (prefer roadSnappedPath, fallback to denoised pings)
-  const activePath = roadSnappedPath.length > 0
+  // Active path to draw on map (prefer roadSnappedPath when snapToRoads is ON, fallback to denoised pings)
+  const activePath = (snapToRoads && roadSnappedPath.length > 0)
     ? roadSnappedPath
     : denoisedPings.map((p) => [p.latitude, p.longitude]);
 
@@ -278,6 +279,18 @@ export default function RouteHistory() {
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span>{loading ? 'Snapping...' : 'Refresh Route'}</span>
+            </button>
+
+            <button
+              onClick={() => setSnapToRoads(!snapToRoads)}
+              className={`px-3 py-2 rounded-lg text-xs font-semibold border transition cursor-pointer flex items-center gap-1.5 ${
+                snapToRoads
+                  ? 'bg-cyan-500/20 border-cyan-500/60 text-cyan-300 shadow'
+                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-white'
+              }`}
+              title="Toggle between OSRM road-snapped path and clean Kalman GPS path"
+            >
+              🛣️ Snap to Roads ({snapToRoads ? 'ON' : 'OFF'})
             </button>
 
             <button
