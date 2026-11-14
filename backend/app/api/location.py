@@ -9,7 +9,7 @@ from app.api.websocket import manager
 from app.db.models import User, Location, RouteCache
 from app.schemas.location import LocationPing, LocationBatch, LocationOut, UserLiveStatus
 from app.ml.anomaly import detect_gps_spoofing, filter_clean_trajectory, calculate_real_travel_distance
-from app.services.routing import snap_trail, VALID_PROFILES
+from app.services.routing import process_staff_route, snap_trail, VALID_PROFILES
 
 router = APIRouter(prefix="/location", tags=["Location & Telemetry"])
 
@@ -269,30 +269,56 @@ def purge_old_telemetry(
     db.commit()
     return {"message": f"Successfully purged {deleted_count} telemetry records older than 7 days."}
 
-@router.get("/history/{user_id}", response_model=List[LocationOut])
-def get_location_history(
+@router.get("/history/{user_id}")
+async def get_location_history(
     user_id: int,
-    date_str: Optional[str] = Query(None, description="Format: YYYY-MM-DD"),
+    date: Optional[str] = Query(None, description="Format: YYYY-MM-DD (IST day)"),
+    date_str: Optional[str] = Query(None, description="Alternative date param YYYY-MM-DD"),
+    profile: str = Query("driving", description="driving | walking | cycling"),
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin)
 ):
     """
-    Admin endpoint to fetch trajectory history for route replay on map.
+    Route replay history endpoint with AI Denoising, 2D Kalman filter & HMM Road-Snapping.
+    Matches exact Location columns (user_id, recorded_at), filters out mock locations,
+    low accuracy fixes (>25m) and velocity leaps (>38m/s), returning road-snapped path.
     """
-    query = db.query(Location).filter(Location.user_id == user_id)
-    if date_str:
-        try:
-            ist_tz = timezone(timedelta(hours=5, minutes=30))
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            start_date_ist = dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=ist_tz)
-            end_date_ist = start_date_ist + timedelta(days=1)
-            query = query.filter(Location.recorded_at >= start_date_ist, Location.recorded_at < end_date_ist)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-    
-    locations = query.order_by(Location.recorded_at.asc()).limit(3000).all()
-    cleaned = filter_clean_trajectory(locations, min_movement_m=15.0)
-    return cleaned
+    target_date = date or date_str
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    if not target_date:
+        target_date = datetime.now(ist_tz).strftime("%Y-%m-%d")
+
+    try:
+        dt = datetime.strptime(target_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    start_date_ist = dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=ist_tz)
+    end_date_ist = start_date_ist + timedelta(days=1)
+
+    # Filter by user_id and capture timestamp ordered ascending
+    query = (
+        db.query(Location)
+        .filter(
+            Location.user_id == user_id,
+            Location.recorded_at >= start_date_ist,
+            Location.recorded_at < end_date_ist
+        )
+        .order_by(Location.recorded_at.asc())
+    )
+    raw_pings = query.limit(10000).all()
+
+    # Run AI Denoising, Kalman Filtering & HMM Road-Snapping
+    route_data = await process_staff_route(raw_pings, profile=profile)
+    route_data["date"] = target_date
+    route_data["employee_id"] = user_id
+    route_data["user_id"] = user_id
+    route_data["profile"] = profile
+    route_data["segments"] = [route_data["road_snapped_path"]] if route_data["road_snapped_path"] else []
+    route_data["coordinates"] = route_data["road_snapped_path"]
+    route_data["distance_m"] = round(route_data["total_distance_km"] * 1000.0, 1)
+    route_data["snapped"] = route_data["map_match_confidence"] > 0
+    return route_data
 
 @router.delete("/clear/{user_id}")
 def clear_user_locations(
@@ -309,78 +335,26 @@ def clear_user_locations(
 IST = timezone(timedelta(hours=5, minutes=30))
 
 @router.get("/route/{user_id}")
-def get_snapped_route(
+async def get_snapped_route(
     user_id: int,
-    date_str: str = Query(..., description="Format: YYYY-MM-DD (IST day)"),
+    date_str: Optional[str] = Query(None, description="Format: YYYY-MM-DD (IST day)"),
+    date: Optional[str] = Query(None, description="Format: YYYY-MM-DD (IST day)"),
     profile: str = Query("driving", description="driving | walking | cycling"),
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin)
 ):
     """
     Admin endpoint: the employee's trail for a day, snapped onto real roads.
-
-    Past days are cached after a fully successful match. Today is never cached
-    because new points keep arriving. If some chunks cannot be matched, those
-    parts come back as raw GPS and `snapped` is false.
+    Uses process_staff_route for HMM road snapping and AI denoising.
     """
-    if profile not in VALID_PROFILES:
-        raise HTTPException(status_code=400, detail=f"profile must be one of {sorted(VALID_PROFILES)}")
-    try:
-        day = datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    target_date = date or date_str
+    if not target_date:
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
 
-    today_ist = datetime.now(IST).strftime("%Y-%m-%d")
-    is_past_day = date_str < today_ist
-
-    if is_past_day:
-        try:
-            cached = (
-                db.query(RouteCache)
-                .filter(RouteCache.user_id == user_id, RouteCache.day == date_str, RouteCache.profile == profile)
-                .first()
-            )
-            if cached:
-                segments = json.loads(cached.geometry)
-                return {
-                    "segments": segments,
-                    "coordinates": [pt for seg in segments for pt in seg],
-                    "distance_m": cached.distance_m or 0.0,
-                    "snapped": True,
-                    "failed_chunks": 0,
-                    "profile": profile,
-                    "cached": True,
-                }
-        except Exception as e:
-            db.rollback()
-
-    start = day.replace(tzinfo=IST)
-    end = start + timedelta(days=1)
-    rows = (
-        db.query(Location)
-        .filter(Location.user_id == user_id, Location.recorded_at >= start, Location.recorded_at < end)
-        .order_by(Location.recorded_at.asc())
-        .limit(10000)
-        .all()
+    return await get_location_history(
+        user_id=user_id,
+        date=target_date,
+        profile=profile,
+        db=db,
+        admin=admin
     )
-    # Remove bad-accuracy fixes, teleports and standing-still jitter, but keep
-    # slow turns (small threshold) so corners are not cut.
-    cleaned = filter_clean_trajectory(rows, min_movement_m=8.0)
-
-    result = snap_trail(cleaned, profile=profile)
-    result["cached"] = False
-
-    if is_past_day and result["snapped"] and result["segments"]:
-        db.add(RouteCache(
-            user_id=user_id,
-            day=date_str,
-            profile=profile,
-            geometry=json.dumps(result["segments"]),
-            distance_m=result["distance_m"],
-        ))
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()  # another request cached it first; fine
-
-    return result
