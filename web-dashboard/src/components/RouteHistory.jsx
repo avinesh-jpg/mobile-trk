@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { MapContainer, TileLayer, Polyline, Marker, Popup } from "react-leaflet";
-import api from "../api";
+import { api } from "../api";
 
 export default function RouteHistory({ employeeId, selectedDate }) {
   const [routePath, setRoutePath] = useState([]);

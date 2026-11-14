@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.db.models import LocationPing
 from app.services.routing import process_staff_route
+from app.api.deps import get_db
 
 router = APIRouter()
 
