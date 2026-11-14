@@ -1,306 +1,245 @@
-"""
-Road snapping (map matching) for GPS trails using an OSRM server.
-
-The trail is split into small overlapping chunks (OSRM handles ~100 points per
-request), each chunk is matched to the road network using timestamps and GPS
-accuracy radiuses, and the pieces are stitched back into continuous segments.
-
-If a chunk cannot be matched, its raw GPS points are used for that part and the
-result is flagged as not fully snapped, so the UI can tell the user honestly.
-"""
 import math
-import time
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+import numpy as np
+import httpx
+import polyline
 
-import requests
-
-from app.core.config import settings
-
-CHUNK_SIZE = 8           # OSRM public demo server limits /match to 10 points
-CHUNK_OVERLAP = 1        # shared point between chunks so segments join up
-MIN_RADIUS_M = 10.0      # OSRM default (5 m) is too tight for phone GPS
-MAX_RADIUS_M = 50.0
-JOIN_DISTANCE_M = 40.0   # join consecutive segments that end/start this close
-REQUEST_TIMEOUT_S = 15
-PAUSE_BETWEEN_CHUNKS_S = 0.25   # be polite to the public OSRM server
-VALID_PROFILES = {"driving", "walking", "cycling"}
-
-LatLng = List[float]  # [lat, lng]
+# Point to your self-hosted OSRM server (or public demo server for testing only)
+OSRM_BASE_URL = "http://router.project-osrm.org"
 
 
-def haversine_m(a: LatLng, b: LatLng) -> float:
-    r = 6371000.0
-    p1, p2 = math.radians(a[0]), math.radians(b[0])
-    dphi = p2 - p1
-    dlmb = math.radians(b[1] - a[1])
-    h = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(h))
+def haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance in meters between two WGS84 coordinates."""
+    R = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    )
+    return 2.0 * R * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
-def prepare_points(locations: list) -> List[Dict[str, Any]]:
-    """Convert DB rows to plain dicts with strictly increasing timestamps and remove stationary jitter."""
-    pts: List[Dict[str, Any]] = []
-    last_ts: Optional[int] = None
-    for loc in locations:
-        if loc.recorded_at is None:
-            continue
-        ts = int(loc.recorded_at.timestamp())
-        if last_ts is not None and ts <= last_ts:
-            continue  # OSRM requires strictly increasing timestamps
-        
-        lat = float(loc.latitude)
-        lng = float(loc.longitude)
-        
-        # Filter out standing-still jitter (< 3 meters)
-        if pts and haversine_m([pts[-1]["lat"], pts[-1]["lng"]], [lat, lng]) < 3.0:
-            continue
-
-        last_ts = ts
-        acc = loc.accuracy if loc.accuracy is not None else 20.0
-        pts.append({
-            "lat": lat,
-            "lng": lng,
-            "ts": ts,
-            "radius": max(MIN_RADIUS_M, min(float(acc), MAX_RADIUS_M)),
-        })
-    return pts
-
-
-def make_chunks(points: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    if len(points) <= CHUNK_SIZE:
-        return [points] if len(points) >= 2 else []
-    chunks = []
-    step = CHUNK_SIZE - CHUNK_OVERLAP
-    i = 0
-    while i < len(points) - CHUNK_OVERLAP:
-        chunk = points[i:i + CHUNK_SIZE]
-        if len(chunk) >= 2:
-            chunks.append(chunk)
-        i += step
-    return chunks
-
-
-def _match_chunk(
-    session: requests.Session,
-    chunk: List[Dict[str, Any]],
-    profile: str,
-) -> Optional[Tuple[List[List[LatLng]], float]]:
-    """Return (segments, distance_m) for one chunk, or None if matching failed."""
-    coords = ";".join(f"{p['lng']:.6f},{p['lat']:.6f}" for p in chunk)
-    params = {
-        "geometries": "geojson",
-        "overview": "full",
-        "gaps": "split",
-        "tidy": "true",
-        "timestamps": ";".join(str(p["ts"]) for p in chunk),
-        "radiuses": ";".join(f"{p['radius']:.0f}" for p in chunk),
-    }
-    url = f"{settings.OSRM_BASE_URL.rstrip('/')}/match/v1/{profile}/{coords}"
-    try:
-        resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT_S)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-    except (requests.RequestException, ValueError):
-        return None
-
-    if data.get("code") != "Ok" or not data.get("matchings"):
-        return None
-
-    segments: List[List[LatLng]] = []
-    distance = 0.0
-    for m in data["matchings"]:
-        line = [[lat, lng] for lng, lat in m["geometry"]["coordinates"]]
-        if len(line) >= 2:
-            segments.append(line)
-            distance += float(m.get("distance") or 0.0)
-    if not segments:
-        return None
-    return segments, distance
-
-
-def _route_chunk(
-    session: requests.Session,
-    chunk: List[Dict[str, Any]],
-    profile: str,
-) -> Optional[Tuple[List[List[LatLng]], float]]:
+def filter_and_sort_pings(
+    pings: List[Dict[str, Any]],
+    max_accuracy_m: float = 25.0,
+    max_speed_mps: float = 38.0,  # ~136 km/h max realistic road speed
+) -> List[Dict[str, Any]]:
     """
-    Calculate physical road geometry across chunk waypoints using OSRM routing.
-    This mimics Rapido / Uber / Google Maps route assignment along physical streets.
+    Stage 1A: Sort by device capture timestamp (fixes offline SQLite batch syncs)
+    and drop low-accuracy or impossible teleportation spikes.
     """
-    coords = ";".join(f"{p['lng']:.6f},{p['lat']:.6f}" for p in chunk)
-    params = {
-        "geometries": "geojson",
-        "overview": "full",
-        "steps": "false",
-    }
-    url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{coords}"
-    try:
-        resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT_S)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("code") == "Ok" and data.get("routes"):
-                route = data["routes"][0]
-                geometry = route.get("geometry", {}).get("coordinates", [])
-                line = [[lat, lng] for lng, lat in geometry]
-                if len(line) >= 2:
-                    return [line], float(route.get("distance") or 0.0)
-    except (requests.RequestException, ValueError):
-        pass
+    if not pings:
+        return []
 
-    # Pairwise fallback between consecutive chunk waypoints if full chunk routing failed
-    sub_lines: List[LatLng] = []
-    tot_dist = 0.0
-    for i in range(len(chunk) - 1):
-        p1 = f"{chunk[i]['lng']:.6f},{chunk[i]['lat']:.6f}"
-        p2 = f"{chunk[i+1]['lng']:.6f},{chunk[i+1]['lat']:.6f}"
-        pair_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{p1};{p2}"
-        try:
-            r = session.get(pair_url, params={"geometries": "geojson", "overview": "full"}, timeout=5)
-            d = r.json()
-            if d.get("code") == "Ok" and d.get("routes"):
-                rt = d["routes"][0]
-                coords_list = [[lat, lng] for lng, lat in rt["geometry"]["coordinates"]]
-                if sub_lines:
-                    sub_lines.extend(coords_list[1:])
-                else:
-                    sub_lines.extend(coords_list)
-                tot_dist += float(rt.get("distance") or 0.0)
+    # 1. Sort strictly by device capture time
+    sorted_pings = sorted(pings, key=lambda p: p["timestamp"])
+
+    cleaned: List[Dict[str, Any]] = []
+    for ping in sorted_pings:
+        # Drop mock locations or high-error cell/Wi-Fi pings
+        if ping.get("is_mock", False):
+            continue
+        accuracy = ping.get("accuracy")
+        if accuracy is not None and accuracy > max_accuracy_m:
+            continue
+
+        if not cleaned:
+            cleaned.append(ping)
+            continue
+
+        prev = cleaned[-1]
+        dt = (ping["timestamp"] - prev["timestamp"]).total_seconds()
+
+        # Deduplicate identical or sub-second duplicate pings
+        if dt < 1.0:
+            continue
+
+        dist = haversine_meters(
+            prev["latitude"], prev["longitude"], ping["latitude"], ping["longitude"]
+        )
+        speed = dist / dt
+
+        # Reject impossible GPS jumps onto parallel streets
+        if speed > max_speed_mps:
+            continue
+
+        cleaned.append(ping)
+
+    return cleaned
+
+
+class GPSKalmanFilter2D:
+    """
+    Stage 1B: 2D Kinematic Kalman Filter (State: [lat, lon, v_lat, v_lon]).
+    Smooths stationary indoor jitter while preserving true movement trajectories.
+    """
+
+    def __init__(self, process_noise: float = 1e-5, measurement_noise: float = 1e-4):
+        self.q = process_noise
+        self.r_base = measurement_noise
+        self.x: Optional[np.ndarray] = None  # State vector [lat, lon, v_lat, v_lon]
+        self.P: Optional[np.ndarray] = None  # Covariance matrix
+        self.last_ts: Optional[datetime] = None
+
+    def filter_trajectory(self, pings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if len(pings) < 2:
+            return pings
+
+        smoothed: List[Dict[str, Any]] = []
+        for ping in pings:
+            ts = ping["timestamp"]
+            z = np.array([ping["latitude"], ping["longitude"]], dtype=float)
+
+            # Scale measurement noise dynamically using reported GPS accuracy
+            acc = ping.get("accuracy") or 10.0
+            r_scale = max(1.0, (acc / 10.0) ** 2)
+            R = np.eye(2) * (self.r_base * r_scale)
+
+            if self.x is None:
+                self.x = np.array([z[0], z[1], 0.0, 0.0], dtype=float)
+                self.P = np.eye(4) * 1e-3
+                self.last_ts = ts
+                smoothed.append({**ping})
                 continue
-        except Exception:
-            pass
-        pt_a = [chunk[i]["lat"], chunk[i]["lng"]]
-        pt_b = [chunk[i+1]["lat"], chunk[i+1]["lng"]]
-        if not sub_lines:
-            sub_lines.append(pt_a)
-        sub_lines.append(pt_b)
-        tot_dist += haversine_m(pt_a, pt_b)
 
-    if len(sub_lines) >= 2:
-        return [sub_lines], tot_dist
-    return None
+            dt = max(1.0, (ts - self.last_ts).total_seconds())
+            self.last_ts = ts
+
+            # State transition matrix
+            F = np.array(
+                [
+                    [1, 0, dt, 0],
+                    [0, 1, 0, dt],
+                    [0, 0, 1, 0],
+                    [0, 0, 0, 1],
+                ],
+                dtype=float,
+            )
+            Q = np.eye(4) * (self.q * dt)
+
+            # Predict
+            self.x = F @ self.x
+            self.P = F @ self.P @ F.T + Q
+
+            # Update
+            H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=float)
+            y = z - (H @ self.x)
+            S = H @ self.P @ H.T + R
+            K = self.P @ H.T @ np.linalg.inv(S)
+
+            self.x = self.x + (K @ y)
+            self.P = (np.eye(4) - (K @ H)) @ self.P
+
+            smoothed.append(
+                {
+                    **ping,
+                    "latitude": float(self.x[0]),
+                    "longitude": float(self.x[1]),
+                }
+            )
+
+        return smoothed
 
 
-def _raw_segment(chunk: List[Dict[str, Any]]) -> Tuple[List[LatLng], float]:
-    line = [[p["lat"], p["lng"]] for p in chunk]
-    dist = sum(haversine_m(line[i - 1], line[i]) for i in range(1, len(line)))
-    return line, dist
-
-
-def _connect_segments(
-    session: requests.Session,
-    segments: List[List[LatLng]],
-    profile: str,
-) -> Tuple[List[List[LatLng]], float]:
+async def snap_to_roads_hmm(
+    pings: List[Dict[str, Any]],
+    profile: str = "driving",
+    chunk_size: int = 80,
+) -> Dict[str, Any]:
     """
-    Connect consecutive road segments by routing along physical roadways between them
-    (Google Maps / Rapido style). Produces a continuous, unbroken highway line.
+    Stage 2: Hidden Markov Model (HMM) + Viterbi Map Matching via OSRM /match.
+    Snaps denoised GPS points onto actual road centerlines.
     """
-    if not segments:
-        return [], 0.0
+    if not pings:
+        return {"matched_coordinates": [], "distance_meters": 0.0, "confidence": 0.0}
 
-    connected: List[LatLng] = list(segments[0])
-    extra_distance = 0.0
-
-    for i in range(1, len(segments)):
-        prev_end = connected[-1]
-        next_start = segments[i][0]
-        gap_m = haversine_m(prev_end, next_start)
-
-        # If already touching or very close, seamlessly stitch
-        if gap_m <= 25.0:
-            connected.extend(segments[i])
-            continue
-
-        # If gap exists (e.g. driver stopped, interval gap), route between endpoints
-        if gap_m <= 50000.0:
-            p1 = f"{prev_end[1]:.6f},{prev_end[0]:.6f}"
-            p2 = f"{next_start[1]:.6f},{next_start[0]:.6f}"
-            pair_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/{profile}/{p1};{p2}"
-            try:
-                r = session.get(pair_url, params={"geometries": "geojson", "overview": "full"}, timeout=REQUEST_TIMEOUT_S)
-                if r.status_code == 200:
-                    d = r.json()
-                    if d.get("code") == "Ok" and d.get("routes"):
-                        rt = d["routes"][0]
-                        bridge_coords = [[lat, lng] for lng, lat in rt["geometry"]["coordinates"]]
-                        if len(bridge_coords) >= 2:
-                            connected.extend(bridge_coords[1:])
-                            connected.extend(segments[i])
-                            extra_distance += float(rt.get("distance") or 0.0)
-                            continue
-            except Exception:
-                pass
-
-        connected.extend(segments[i])
-
-    tot_dist = sum(haversine_m(connected[j - 1], connected[j]) for j in range(1, len(connected)))
-    return [connected], tot_dist
-
-
-def snap_trail(locations: list, profile: str = "driving") -> Dict[str, Any]:
-    """
-    Snap a list of Location rows (ordered by time) to roads.
-
-    Returns:
-      {
-        "segments":    [[ [lat,lng], ... ], ...]   continuous road-following pieces
-        "coordinates": flat [lat,lng] list (all segments in order)
-        "distance_m":  total distance along the returned geometry
-        "snapped":     True only if every chunk matched to roads
-        "failed_chunks": number of chunks that fell back to raw GPS
-        "profile":     profile used
-      }
-    """
-    if profile not in VALID_PROFILES:
-        profile = "driving"
-
-    points = prepare_points(locations)
-    chunks = make_chunks(points)
-    if not chunks:
-        raw = [[p["lat"], p["lng"]] for p in points]
+    if len(pings) == 1:
+        p = pings[0]
         return {
-            "segments": [raw] if raw else [],
-            "coordinates": raw,
-            "distance_m": 0.0,
-            "snapped": False,
-            "failed_chunks": 0,
-            "profile": profile,
+            "matched_coordinates": [[p["latitude"], p["longitude"]]],
+            "distance_meters": 0.0,
+            "confidence": 1.0,
         }
 
-    all_segments: List[List[LatLng]] = []
+    matched_coords: List[List[float]] = []
     total_distance = 0.0
-    failed = 0
+    confidences: List[float] = []
 
-    with requests.Session() as session:
-        for idx, chunk in enumerate(chunks):
-            if idx > 0:
-                time.sleep(PAUSE_BETWEEN_CHUNKS_S)
-            # 1. First attempt map-matching (traces GPS with timestamps and accuracy)
-            result = _match_chunk(session, chunk, profile)
-            if result is None:
-                # 2. Rapido / Google Maps routing fallback (calculates real road curves between points)
-                time.sleep(0.15)
-                result = _route_chunk(session, chunk, profile)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # Process in overlapping chunks so road transitions stay continuous
+        step = chunk_size - 1
+        for i in range(0, len(pings), step):
+            batch = pings[i : i + chunk_size]
+            if len(batch) < 2:
+                break
 
-            # 3. Only if both OSRM match and route engines fail, fall back to raw GPS line
-            if result is None:
-                failed += 1
-                line, dist = _raw_segment(chunk)
-                all_segments.append(line)
-                total_distance += dist
-            else:
-                segs, dist = result
-                all_segments.extend(segs)
+            # OSRM expects "lon,lat;lon,lat"
+            coord_str = ";".join(f"{p['longitude']},{p['latitude']}" for p in batch)
+            timestamps_str = ";".join(
+                str(int(p["timestamp"].timestamp())) for p in batch
+            )
+            radiuses_str = ";".join(
+                str(min(50, max(10, int(p.get("accuracy") or 15)))) for p in batch
+            )
 
-        segments, total_distance = _connect_segments(session, all_segments, profile)
+            url = f"{OSRM_BASE_URL}/match/v1/{profile}/{coord_str}"
+            params = {
+                "steps": "false",
+                "geometries": "polyline6",
+                "overview": "full",
+                "timestamps": timestamps_str,
+                "radiuses": radiuses_str,
+                "gaps": "ignore",
+            }
 
-    flat = segments[0] if segments else []
+            try:
+                resp = await client.get(url, params=params)
+                data = resp.json()
+
+                if data.get("code") == "Ok" and data.get("matchings"):
+                    for matching in data["matchings"]:
+                        # Decode precision-6 polyline into [[lat, lon], ...]
+                        decoded = polyline.decode(matching["geometry"], 6)
+                        if matched_coords and decoded:
+                            # Avoid duplicating overlapping boundary vertex
+                            matched_coords.extend(decoded[1:])
+                        else:
+                            matched_coords.extend(decoded)
+
+                        total_distance += matching.get("distance", 0.0)
+                        confidences.append(matching.get("confidence", 0.8))
+                else:
+                    # Fallback to Kalman-smoothed points if off-road (e.g., inside large warehouse/campus)
+                    fallback = [[p["latitude"], p["longitude"]] for p in batch]
+                    matched_coords.extend(fallback[1:] if matched_coords else fallback)
+
+            except Exception:
+                fallback = [[p["latitude"], p["longitude"]] for p in batch]
+                matched_coords.extend(fallback[1:] if matched_coords else fallback)
+
+    avg_confidence = sum(confidences) / len(confidences) if confidences else 0.5
     return {
-        "segments": segments,
-        "coordinates": flat,
-        "distance_m": round(total_distance, 1),
-        "snapped": failed == 0,
-        "failed_chunks": failed,
-        "profile": profile,
+        "matched_coordinates": matched_coords,  # Ready for Leaflet <Polyline positions={...} />
+        "distance_meters": round(total_distance, 2),
+        "confidence": round(avg_confidence, 3),
+    }
+
+
+async def process_staff_route(raw_pings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Full End-to-End Route Cleaning + AI Road-Snapping Pipeline."""
+    clean_pings = filter_and_sort_pings(raw_pings)
+    kf = GPSKalmanFilter2D()
+    denoised_pings = kf.filter_trajectory(clean_pings)
+    snapped_result = await snap_to_roads_hmm(denoised_pings)
+
+    return {
+        "raw_count": len(raw_pings),
+        "clean_count": len(denoised_pings),
+        "denoised_pings": denoised_pings,
+        "road_snapped_path": snapped_result["matched_coordinates"],
+        "total_distance_km": round(snapped_result["distance_meters"] / 1000.0, 2),
+        "map_match_confidence": snapped_result["confidence"],
     }
