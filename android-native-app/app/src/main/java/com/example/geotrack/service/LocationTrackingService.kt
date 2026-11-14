@@ -88,7 +88,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     private fun startTrackingService() {
-        val notification = buildForegroundNotification("CM Vechicle Active", "Live vehicle tracking active (10s stream)")
+        val notification = buildForegroundNotification("CM Vechicle Active", "Live vehicle tracking active (4s high-precision stream)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
@@ -131,11 +131,11 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     private fun registerLocationUpdates() {
         try {
             locationManager?.let { lm ->
-                // Optimized 10-second interval to stay within Supabase 500MB free tier and save battery
+                // Adaptive 4-second interval for bike & bus high-precision tracking
                 if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                     lm.requestLocationUpdates(
                         LocationManager.GPS_PROVIDER,
-                        10000L,
+                        4000L,
                         5.0f,
                         this
                     )
@@ -143,7 +143,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
                 if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                     lm.requestLocationUpdates(
                         LocationManager.NETWORK_PROVIDER,
-                        15000L,
+                        8000L,
                         10.0f,
                         this
                     )
@@ -232,9 +232,22 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
             return
         }
 
+        val speedKmh = if (location.hasSpeed()) (location.speed * 3.6) else 0.0
+        val isMoving = speedKmh > 2.0 || currentActivityType == "walking"
+        val cleanActivity = when {
+            speedKmh > 12.0 -> "in_vehicle"
+            isMoving -> "walking"
+            else -> "still"
+        }
+
+        // Adaptive throttle:
+        // While moving on bike/bus/walking, stream every fix (4 seconds)
+        // While stationary at desk, throttle heartbeat to once every 60 seconds
         val now = System.currentTimeMillis()
-        if (now - lastRecordedPingTime < 8000) return
+        val minIntervalMs = if (isMoving) 3800L else 60000L
+        if (now - lastRecordedPingTime < minIntervalMs) return
         lastRecordedPingTime = now
+
         val batteryPct = getBatteryPercentage()
         val isMock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             location.isMock
@@ -242,8 +255,6 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
             @Suppress("DEPRECATION")
             location.isFromMockProvider
         }
-
-        val speedKmh = if (location.hasSpeed()) (location.speed * 3.6) else 0.0
 
         serviceScope.launch {
             GeoTrackApp.instance.trackingRepository.recordLocationPing(
@@ -254,7 +265,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
                 heading = if (location.hasBearing()) location.bearing else 0f,
                 accuracy = if (location.hasAccuracy()) location.accuracy else 8f,
                 battery = batteryPct,
-                activity = currentActivityType,
+                activity = cleanActivity,
                 isMock = isMock
             )
         }
