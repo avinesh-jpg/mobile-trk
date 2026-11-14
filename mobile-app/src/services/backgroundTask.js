@@ -45,16 +45,35 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         batteryLevel = Math.round(level * 100);
       } catch (e) {}
 
+      const rawSpeedKmh = latest.coords.speed ? (latest.coords.speed * 3.6) : 0;
+      const isVehicleMoving = rawSpeedKmh > 2.5;
+      const isWalkingMotion = rawSpeedKmh > 1.2;
+      const isMoving = isVehicleMoving || isWalkingMotion;
+      const cleanSpeed = isMoving ? Math.round(rawSpeedKmh) : 0;
+      const cleanActivity = isMoving ? (rawSpeedKmh > 12 ? 'in_vehicle' : 'walking') : 'still';
+
+      // Adaptive throttle: while stationary in background, send heartbeat once every 60s
+      // While moving on bus/bike/walking, stream every 4s fix
+      const nowMs = Date.now();
+      const lastBgStr = await AsyncStorage.getItem('last_bg_ping_time');
+      const lastBgMs = lastBgStr ? parseInt(lastBgStr, 10) : 0;
+      if (!isMoving && (nowMs - lastBgMs < 60000)) {
+        return;
+      }
+      if (!isMoving) {
+        await AsyncStorage.setItem('last_bg_ping_time', String(nowMs));
+      }
+
       const pingPayload = {
         latitude: latest.coords.latitude,
         longitude: latest.coords.longitude,
         altitude: latest.coords.altitude || null,
-        speed: latest.coords.speed ? Math.round(latest.coords.speed * 3.6) : 0, // Convert m/s to km/h
+        speed: cleanSpeed,
         heading: latest.coords.heading || 0,
         accuracy: latest.coords.accuracy || 10,
         battery_level: batteryLevel,
-        is_moving: (latest.coords.speed || 0) > 0.5,
-        activity_type: (latest.coords.speed || 0) > 4 ? 'in_vehicle' : ((latest.coords.speed || 0) > 0.5 ? 'walking' : 'still'),
+        is_moving: isMoving,
+        activity_type: cleanActivity,
         is_mock: latest.mocked || false,
         recorded_at: new Date(latest.timestamp).toISOString(),
       };

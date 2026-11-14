@@ -23,6 +23,7 @@ export default function TrackingScreen({ user, onLogout }) {
   const [isTracking, setIsTracking] = useState(false);
   const [activity, setActivity] = useState('still');
   const foregroundWatcher = useRef(null);
+  const lastStationaryPingTime = useRef(0);
 
   // Restore tracking state if Android OS restarted the app during permission grant
   useEffect(() => {
@@ -105,6 +106,16 @@ export default function TrackingScreen({ user, onLogout }) {
       const cleanSpeed = isPhysicallyMoving ? Math.round(rawSpeedKmh) : 0;
       const cleanActivity = isPhysicallyMoving ? (rawSpeedKmh > 12 ? 'in_vehicle' : 'walking') : 'still';
 
+      // Adaptive throttle: while stationary, only send heartbeat once every 60s
+      // While moving (bike/bus/walking), stream every fix (4s) for high road precision
+      const nowMs = Date.now();
+      if (!isPhysicallyMoving && (nowMs - lastStationaryPingTime.current < 60000)) {
+        return;
+      }
+      if (!isPhysicallyMoving) {
+        lastStationaryPingTime.current = nowMs;
+      }
+
       const payload = {
         latitude: coords.latitude,
         longitude: coords.longitude,
@@ -161,12 +172,12 @@ export default function TrackingScreen({ user, onLogout }) {
         foregroundWatcher.current = null;
       }
 
-      // 1. High GPS accuracy captures satellite coordinates every 10s
+      // 1. High GPS accuracy captures satellite coordinates every 4s (high-precision road tracking)
       foregroundWatcher.current = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.High,
-          timeInterval: 10000,
-          distanceInterval: 10,
+          timeInterval: 4000,
+          distanceInterval: 6,
         },
         (loc) => {
           sendLocationPing(loc.coords, loc.mocked);
@@ -194,11 +205,11 @@ export default function TrackingScreen({ user, onLogout }) {
             if (!alreadyRunning) {
               await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
                 accuracy: Location.Accuracy.High,
-                timeInterval: 10000,
-                distanceInterval: 10,
+                timeInterval: 4000,
+                distanceInterval: 6,
                 foregroundService: {
                   notificationTitle: 'CM Vechicle Active',
-                  notificationBody: 'Live tracking active (10s stream).',
+                  notificationBody: 'Live tracking active (high-precision 4s stream).',
                   notificationColor: '#0284c7',
                 },
               });
