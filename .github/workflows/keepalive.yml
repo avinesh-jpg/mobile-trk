@@ -1,18 +1,48 @@
-name: Render Backend Workday Keep-Alive
+name: Render Workday Keep-Alive (8 AM - 8 PM IST)
 
 on:
   schedule:
-    # Runs every 10 minutes between 02:00 UTC (7:30 AM IST) and 15:30 UTC (9:00 PM IST)
-    # This prevents Render free-tier from sleeping during the working day.
-    - cron: '*/10 2-15 * * *'
-  workflow_dispatch:
+    # Runs every 10 minutes from 02:00 UTC to 14:50 UTC (7:30 AM to 8:20 PM IST)
+    # Prevents Render free-tier spin-down during active work hours.
+    # Stops automatically at night so servers sleep after 8:20 PM IST.
+    - cron: '*/10 2-14 * * *'
+  workflow_dispatch: # Allows manual trigger from GitHub Actions tab anytime
 
 jobs:
   keepalive:
+    name: Ping GeoTrack Backend & Dashboard
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
+      - name: Display Timestamp & Active Shift Window
+        run: |
+          echo "=========================================="
+          echo "GeoTrack Workday Keep-Alive Pinger"
+          echo "IST Time: $(TZ='Asia/Kolkata' date '+%Y-%m-%d %I:%M:%S %p %Z')"
+          echo "Active Window: 08:00 AM to 08:00 PM IST"
+          echo "=========================================="
+
       - name: Ping Render Backend
         run: |
-          echo "Pinging GeoTrack Render Backend to maintain warm state..."
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 60 "https://geotrack-backend-e812.onrender.com/" || echo "failed")
-          echo "Render Backend response HTTP status: $STATUS"
+          BACKEND_URL="https://geotrack-backend-e812.onrender.com/"
+          echo "Pinging Backend: $BACKEND_URL"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 30 --max-time 60 --retry 2 --retry-delay 5 "$BACKEND_URL" || echo "FAILED")
+          echo "Backend HTTP Status: $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ Backend is warm and responding instantly."
+          else
+            echo "⚠️ Backend responded with status: $STATUS"
+          fi
+
+      - name: Ping Render Web Dashboard
+        run: |
+          DASHBOARD_URL="https://geotrack-dashboard.onrender.com/"
+          echo "Pinging Dashboard: $DASHBOARD_URL"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 30 --max-time 60 --retry 2 --retry-delay 5 "$DASHBOARD_URL" || echo "FAILED")
+          echo "Dashboard HTTP Status: $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ Dashboard is warm and ready."
+          else
+            echo "⚠️ Dashboard responded with status: $STATUS"
+          fi
