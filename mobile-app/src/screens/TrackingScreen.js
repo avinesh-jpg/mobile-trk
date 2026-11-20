@@ -19,25 +19,49 @@ import { saveOfflineLocation, syncOfflineLocations } from '../services/offlineSt
 
 const isExpoGo = Constants.appOwnership === 'expo' || Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
 
+const getTodayDateStr = () => {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 export default function TrackingScreen({ user, onLogout }) {
   const [isTracking, setIsTracking] = useState(false);
   const [activity, setActivity] = useState('still');
   const foregroundWatcher = useRef(null);
   const lastStationaryPingTime = useRef(0);
 
-  // Restore tracking state if Android OS restarted the app during permission grant
+  // Strict Daily Shift: Only resume tracking if explicitly started TODAY
   useEffect(() => {
-    AsyncStorage.getItem('shift_active').then((active) => {
-      if (active === 'true') {
-        startTracking(true);
-      }
-    });
+    const checkDailyShiftState = async () => {
+      try {
+        const active = await AsyncStorage.getItem('shift_active');
+        const shiftDate = await AsyncStorage.getItem('shift_date');
+        const today = getTodayDateStr();
 
-    if (!isExpoGo) {
-      Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).then((started) => {
-        if (started) setIsTracking(true);
-      }).catch(() => {});
-    }
+        if (active === 'true' && shiftDate === today) {
+          // Started earlier today - safely resume
+          startTracking(true);
+        } else {
+          // Expired from yesterday or never started today: enforce off-duty state
+          await AsyncStorage.removeItem('shift_active');
+          await AsyncStorage.removeItem('shift_date');
+          setIsTracking(false);
+          if (!isExpoGo) {
+            try {
+              const started = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+              if (started) {
+                await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    };
+
+    checkDailyShiftState();
 
     const sensorSub = Accelerometer.addListener((accelData) => {
       const magnitude = Math.sqrt(
@@ -184,8 +208,10 @@ export default function TrackingScreen({ user, onLogout }) {
         }
       );
 
-      // Persist active shift so Android restarts don't lose tracking
+      // Persist active shift bound strictly to today's date
+      const today = getTodayDateStr();
       await AsyncStorage.setItem('shift_active', 'true');
+      await AsyncStorage.setItem('shift_date', today);
       setIsTracking(true);
 
       // 2. Safe background location check (Only in standalone APK; skipped in Expo Go to avoid sandbox warning)
@@ -240,6 +266,7 @@ export default function TrackingScreen({ user, onLogout }) {
       }
 
       await AsyncStorage.removeItem('shift_active');
+      await AsyncStorage.removeItem('shift_date');
       setIsTracking(false);
       setActivity('still');
 

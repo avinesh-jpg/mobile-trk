@@ -38,7 +38,13 @@ class TrackingRepository(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val prefs: SharedPreferences = context.getSharedPreferences("geotrack_shift_prefs", Context.MODE_PRIVATE)
 
-    private val _isShiftActive = MutableStateFlow(prefs.getBoolean("shift_active", false))
+    private val todayDateStr: String
+        get() = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+
+    private val isShiftActiveToday: Boolean
+        get() = prefs.getBoolean("shift_active", false) && (prefs.getString("shift_date", "") == todayDateStr)
+
+    private val _isShiftActive = MutableStateFlow(isShiftActiveToday)
     val isShiftActive: StateFlow<Boolean> = _isShiftActive.asStateFlow()
 
     private val _isShiftPaused = MutableStateFlow(prefs.getBoolean("shift_paused", false))
@@ -81,6 +87,23 @@ class TrackingRepository(
     private var simLng = -122.4194
 
     init {
+        // Enforce strict daily shift: invalidate any leftover shift from yesterday or earlier
+        if (prefs.getBoolean("shift_active", false) && prefs.getString("shift_date", "") != todayDateStr) {
+            prefs.edit()
+                .putBoolean("shift_active", false)
+                .putBoolean("shift_paused", false)
+                .remove("shift_date")
+                .remove("shift_start_time")
+                .remove("accumulated_active_ms")
+                .remove("last_resume_time")
+                .remove("current_shift_id")
+                .apply()
+            _isShiftActive.value = false
+            _isShiftPaused.value = false
+            _shiftStartTime.value = 0L
+            _currentShiftId.value = ""
+        }
+
         scope.launch {
             updateCounts()
             syncOfflineLocations()
@@ -119,6 +142,7 @@ class TrackingRepository(
 
         prefs.edit()
             .putBoolean("shift_active", true)
+            .putString("shift_date", todayDateStr)
             .putBoolean("shift_paused", false)
             .putLong("shift_start_time", now)
             .putLong("accumulated_active_ms", 0L)
@@ -214,6 +238,7 @@ class TrackingRepository(
 
         prefs.edit()
             .putBoolean("shift_active", false)
+            .remove("shift_date")
             .putBoolean("shift_paused", false)
             .remove("shift_start_time")
             .remove("accumulated_active_ms")

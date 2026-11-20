@@ -12,9 +12,28 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     return;
   }
 
+  // --- STRICT DAILY SHIFT VERIFICATION ---
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const today = `${year}-${month}-${day}`;
+
+  const active = await AsyncStorage.getItem('shift_active');
+  const shiftDate = await AsyncStorage.getItem('shift_date');
+
+  // If shift was NOT explicitly started TODAY, disarm background updates immediately and do not ping
+  if (active !== 'true' || shiftDate !== today) {
+    try {
+      await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+    } catch (e) {}
+    await AsyncStorage.removeItem('shift_active');
+    await AsyncStorage.removeItem('shift_date');
+    return;
+  }
+
   // --- 8:00 PM AUTO SHIFT END & GPS SHUTDOWN ---
-  const now = new Date();
-  const hour = now.getHours(); // 0-23 in local device time (20 = 8:00 PM)
+  const hour = d.getHours(); // 0-23 in local device time (20 = 8:00 PM)
 
   // If time is 8:00 PM or night before 6:00 AM
   if (hour >= 20 || hour < 6) {
@@ -24,6 +43,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     } catch (e) {}
 
     await AsyncStorage.removeItem('shift_active');
+    await AsyncStorage.removeItem('shift_date');
 
     // Inform cloud backend that shift ended automatically at 8:00 PM
     try {

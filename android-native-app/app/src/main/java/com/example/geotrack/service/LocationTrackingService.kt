@@ -81,10 +81,16 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startTrackingService()
+            ACTION_START -> {
+                if (GeoTrackApp.instance.trackingRepository.isShiftActive.value) {
+                    startTrackingService()
+                } else {
+                    stopTrackingService()
+                }
+            }
             ACTION_STOP -> stopTrackingService()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun startTrackingService() {
@@ -220,6 +226,11 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     private fun dispatchLocationPing(location: Location) {
+        if (!GeoTrackApp.instance.trackingRepository.isShiftActive.value) {
+            stopTrackingService()
+            return
+        }
+
         val cal = Calendar.getInstance()
         val hour = cal.get(Calendar.HOUR_OF_DAY)
         if (hour >= 20 || hour < 6) {
