@@ -116,6 +116,20 @@ def filter_and_sort_pings(raw_pings: List[Any]) -> List[Any]:
 
         clean.append(ping)
 
+    # Guard against initial stale GPS fix (e.g. Android returning stale cached fix 10+ km away on app launch)
+    while len(clean) >= 3:
+        p0 = clean[0]
+        p1 = clean[1]
+        p2 = clean[2]
+        d01 = haversine_m([float(_get_val(p0, 'latitude')), float(_get_val(p0, 'longitude'))],
+                          [float(_get_val(p1, 'latitude')), float(_get_val(p1, 'longitude'))])
+        d12 = haversine_m([float(_get_val(p1, 'latitude')), float(_get_val(p1, 'longitude'))],
+                          [float(_get_val(p2, 'latitude')), float(_get_val(p2, 'longitude'))])
+        if d01 > 3000.0 and d12 < 1500.0:
+            clean.pop(0)
+        else:
+            break
+
     return clean
 
 
