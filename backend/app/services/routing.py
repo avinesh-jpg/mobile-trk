@@ -18,6 +18,7 @@ CHUNK_SIZE = 8          # OSRM public demo server limits /match to 10 points
 CHUNK_OVERLAP = 1       # Shared boundary point between chunks
 MAX_SPEED_M_S = 38.0    # 38 m/s = ~136.8 km/h velocity limit
 MAX_ACCURACY_M = 25.0   # Reject fixes with horizontal accuracy > 25m
+PUBLIC_OSRM_FALLBACK = "https://router.project-osrm.org"
 
 
 def haversine_m(a: Union[List[float], Tuple[float, float]], b: Union[List[float], Tuple[float, float]]) -> float:
@@ -300,6 +301,11 @@ async def snap_to_roads_hmm(
     total_distance_m = 0.0
     matched_chunks = 0
 
+    primary_osrm = settings.OSRM_BASE_URL.rstrip('/')
+    osrm_hosts = [primary_osrm]
+    if PUBLIC_OSRM_FALLBACK.rstrip('/') not in osrm_hosts:
+        osrm_hosts.append(PUBLIC_OSRM_FALLBACK.rstrip('/'))
+
     async with httpx.AsyncClient(timeout=12.0) as client:
         for chunk in chunks:
             kalman_pts = [[p["latitude"], p["longitude"]] for p in chunk]
@@ -326,62 +332,67 @@ async def snap_to_roads_hmm(
             chunk_pts: List[List[float]] = []
             chunk_dist = 0.0
 
-            # 1. Attempt OSRM Map Matching with timestamps & radiuses
-            match_url = f"{settings.OSRM_BASE_URL.rstrip('/')}/match/v1/{profile}/{coords}"
-            match_params = {
-                "geometries": "polyline6",
-                "overview": "full",
-                "gaps": "ignore",
-                "tidy": "true",
-                "timestamps": timestamps,
-                "radiuses": radiuses
-            }
-            try:
-                r = await client.get(match_url, params=match_params)
-                if r.status_code == 200:
-                    d = r.json()
-                    if d.get("code") == "Ok" and d.get("matchings"):
-                        candidate_pts: List[List[float]] = []
-                        candidate_dist = 0.0
-                        for m in d["matchings"]:
-                            pts = polyline.decode(m["geometry"], 6)
-                            candidate_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
-                            candidate_dist += float(m.get("distance", 0.0) or 0.0)
-
-                        # Anti-detour validation:
-                        # Ensure matched distance does not exceed 1.7x direct distance or create huge loop
-                        if direct_dist <= 25.0 or candidate_dist <= max(direct_dist * 1.7, direct_dist + 150.0):
-                            chunk_pts = candidate_pts
-                            chunk_dist = candidate_dist
-                            matched_chunks += 1
-            except Exception:
-                pass
-
-            # 2. If timestamped match was rejected or failed, try pure geometric match (without timestamps/radiuses)
-            if not chunk_pts:
+            # Dual-host routing: Try Self-Hosted OSRM first; fallback to Public Demo OSRM
+            for host in osrm_hosts:
+                if chunk_pts:
+                    break
+                match_url = f"{host}/match/v1/{profile}/{coords}"
+                match_params = {
+                    "geometries": "polyline6",
+                    "overview": "full",
+                    "gaps": "ignore",
+                    "tidy": "true",
+                    "timestamps": timestamps,
+                    "radiuses": radiuses
+                }
                 try:
-                    r_geom = await client.get(match_url, params={
-                        "geometries": "polyline6",
-                        "overview": "full",
-                        "gaps": "ignore",
-                        "tidy": "true"
-                    })
-                    if r_geom.status_code == 200:
-                        d_geom = r_geom.json()
-                        if d_geom.get("code") == "Ok" and d_geom.get("matchings"):
-                            candidate_pts = []
+                    r = await client.get(match_url, params=match_params)
+                    if r.status_code == 200:
+                        d = r.json()
+                        if d.get("code") == "Ok" and d.get("matchings"):
+                            candidate_pts: List[List[float]] = []
                             candidate_dist = 0.0
-                            for m in d_geom["matchings"]:
+                            for m in d["matchings"]:
                                 pts = polyline.decode(m["geometry"], 6)
                                 candidate_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
                                 candidate_dist += float(m.get("distance", 0.0) or 0.0)
 
+                            # Anti-detour validation:
+                            # Ensure matched distance does not exceed 1.7x direct distance or create huge loop
                             if direct_dist <= 25.0 or candidate_dist <= max(direct_dist * 1.7, direct_dist + 150.0):
                                 chunk_pts = candidate_pts
                                 chunk_dist = candidate_dist
                                 matched_chunks += 1
+                                break
                 except Exception:
                     pass
+
+                # 2. If timestamped match was rejected or failed, try pure geometric match (without timestamps/radiuses)
+                if not chunk_pts:
+                    try:
+                        r_geom = await client.get(match_url, params={
+                            "geometries": "polyline6",
+                            "overview": "full",
+                            "gaps": "ignore",
+                            "tidy": "true"
+                        })
+                        if r_geom.status_code == 200:
+                            d_geom = r_geom.json()
+                            if d_geom.get("code") == "Ok" and d_geom.get("matchings"):
+                                candidate_pts = []
+                                candidate_dist = 0.0
+                                for m in d_geom["matchings"]:
+                                    pts = polyline.decode(m["geometry"], 6)
+                                    candidate_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
+                                    candidate_dist += float(m.get("distance", 0.0) or 0.0)
+
+                                if direct_dist <= 25.0 or candidate_dist <= max(direct_dist * 1.7, direct_dist + 150.0):
+                                    chunk_pts = candidate_pts
+                                    chunk_dist = candidate_dist
+                                    matched_chunks += 1
+                                    break
+                    except Exception:
+                        pass
 
             # 3. Clean Fallback to Kalman Filtered Coordinates
             # When road matching is unavailable or returns an artificial one-way detour loop,

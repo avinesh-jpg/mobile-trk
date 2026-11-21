@@ -126,93 +126,27 @@ function ChangeMapView({ center, zoom }) {
   return null;
 }
 
-export default function LiveMap({ liveFeed, onNavigateTab }) {
-  const [employees, setEmployees] = useState([]);
-  const [geofences, setGeofences] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedUser, setSelectedUser] = useState(null);
+import { useFleetStore } from '../store/useFleetStore';
+
+export default function LiveMap({ onNavigateTab }) {
+  const employees = useFleetStore((state) => state.employees);
+  const selectedUser = useFleetStore((state) => state.selectedUser);
+  const setSelectedUser = useFleetStore((state) => state.setSelectedUser);
+  const geofences = useFleetStore((state) => state.geofences);
+  const loading = useFleetStore((state) => state.loading);
+  const fetchEmployees = useFleetStore((state) => state.fetchEmployees);
+  const fetchGeofences = useFleetStore((state) => state.fetchGeofences);
+
   const [simulating, setSimulating] = useState(false);
   const [mapStyle, setMapStyle] = useState('google-hybrid');
   const [showTraffic, setShowTraffic] = useState(true);
 
-  const fetchEmployees = async () => {
-    try {
-      const res = await api.get('/location/latest');
-      setEmployees(res.data);
-      if (res.data.length > 0 && !selectedUser) {
-        setSelectedUser(res.data[0]);
-      }
-    } catch (err) {
-      console.error('Error fetching live employees:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchGeofences = async () => {
-    try {
-      const res = await api.get('/geofence/');
-      setGeofences(res.data);
-    } catch (err) {
-      console.error('Error fetching geofences:', err);
-    }
-  };
-
   useEffect(() => {
     fetchEmployees();
     fetchGeofences();
-    const interval = setInterval(fetchEmployees, 5000); // Fast 5s fallback poll
+    const interval = setInterval(fetchEmployees, 10000); // 10s safety sync poll
     return () => clearInterval(interval);
   }, []);
-
-  // Update employee state dynamically when a WebSocket broadcast arrives
-  useEffect(() => {
-    if (!liveFeed) return;
-    setEmployees((prev) => {
-      return prev.map((emp) => {
-        if (emp.user_id === liveFeed.user_id) {
-          if (liveFeed.event === 'shift_ended') {
-            const updated = {
-              ...emp,
-              is_online: false,
-              latest_location: emp.latest_location ? {
-                ...emp.latest_location,
-                speed: 0,
-                is_moving: false,
-                activity_type: 'shift_ended',
-                recorded_at: liveFeed.recorded_at,
-              } : null
-            };
-            if (selectedUser?.user_id === emp.user_id) {
-              setSelectedUser(updated);
-            }
-            return updated;
-          }
-
-          const updated = {
-            ...emp,
-            is_online: true,
-            latest_location: {
-              latitude: liveFeed.latitude,
-              longitude: liveFeed.longitude,
-              heading: liveFeed.heading || 0,
-              accuracy: liveFeed.accuracy || 10,
-              speed: liveFeed.speed,
-              battery_level: liveFeed.battery_level,
-              activity_type: liveFeed.activity_type,
-              is_mock: liveFeed.is_mock,
-              recorded_at: liveFeed.recorded_at,
-            },
-          };
-          if (selectedUser?.user_id === emp.user_id) {
-            setSelectedUser(updated);
-          }
-          return updated;
-        }
-        return emp;
-      });
-    });
-  }, [liveFeed]);
 
   // Dev Tool: Send a simulated live ping to test the real-time pipeline
   const sendSimulatedPing = async (emp) => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import Navbar from './components/Navbar';
 import LiveMap from './components/LiveMap';
 import RouteHistory from './components/RouteHistory';
@@ -8,17 +8,29 @@ import TimesheetExport from './components/TimesheetExport';
 import UserManager from './components/UserManager';
 import Login from './components/Login';
 import { WS_BASE } from './api';
+import { useFleetStore } from './store/useFleetStore';
 
 export default function App() {
-  const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem('user');
-    return saved ? JSON.parse(saved) : null;
-  });
-  const [activeTab, setActiveTab] = useState('live');
-  const [isWsConnected, setIsWsConnected] = useState(false);
-  const [liveFeed, setLiveFeed] = useState(null);
+  const user = useFleetStore((state) => state.user);
+  const setUser = useFleetStore((state) => state.setUser);
+  const logout = useFleetStore((state) => state.logout);
+  const activeTab = useFleetStore((state) => state.activeTab);
+  const setActiveTab = useFleetStore((state) => state.setActiveTab);
+  const isWsConnected = useFleetStore((state) => state.isWsConnected);
+  const setIsWsConnected = useFleetStore((state) => state.setIsWsConnected);
+  const handleLiveTelemetry = useFleetStore((state) => state.handleLiveTelemetry);
+  const fetchEmployees = useFleetStore((state) => state.fetchEmployees);
+  const fetchGeofences = useFleetStore((state) => state.fetchGeofences);
 
-  // Maintain WebSocket connection to FastAPI backend
+  // Initial data preloading on login
+  useEffect(() => {
+    if (user) {
+      fetchEmployees();
+      fetchGeofences();
+    }
+  }, [user]);
+
+  // Maintain WebSocket connection to FastAPI backend & stream into Zustand store
   useEffect(() => {
     if (!user) return;
 
@@ -36,7 +48,8 @@ export default function App() {
         try {
           const data = JSON.parse(event.data);
           if (data.event === 'location_update' || data.event === 'shift_ended') {
-            setLiveFeed(data);
+            // Push directly into centralized Zustand store with high performance
+            handleLiveTelemetry(data);
           }
         } catch (e) {
           console.error('Error parsing WS message:', e);
@@ -62,12 +75,6 @@ export default function App() {
     };
   }, [user]);
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    setUser(null);
-  };
-
   if (!user) {
     return <Login onLoginSuccess={(userData) => setUser(userData)} />;
   }
@@ -78,12 +85,12 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         user={user}
-        onLogout={handleLogout}
+        onLogout={logout}
         isWsConnected={isWsConnected}
       />
 
       <main className="flex-1 w-full h-[calc(100vh-4rem)] flex flex-col overflow-hidden relative">
-        {activeTab === 'live' && <LiveMap liveFeed={liveFeed} onNavigateTab={setActiveTab} />}
+        {activeTab === 'live' && <LiveMap onNavigateTab={setActiveTab} />}
         {activeTab === 'history' && <RouteHistory />}
         {activeTab === 'analytics' && <AnalyticsAI />}
         {activeTab === 'geofences' && <GeofenceManager />}
