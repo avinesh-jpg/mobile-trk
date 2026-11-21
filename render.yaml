@@ -1,5 +1,5 @@
 services:
-  # 1. Python FastAPI Backend Web Service (Free Tier)
+  # 1. Python FastAPI Backend Web Service (Free / Starter Tier)
   - type: web
     name: geotrack-backend
     runtime: python
@@ -17,6 +17,9 @@ services:
         value: HS256
       - key: ACCESS_TOKEN_EXPIRE_MINUTES
         value: 43200
+      # Automatic primary routing: can point to private cloud OSRM or public cluster
+      - key: OSRM_BASE_URL
+        value: https://router.project-osrm.org
 
   # 2. React Web Dashboard (Static Site - Free Tier)
   - type: web
@@ -34,3 +37,15 @@ services:
         sync: false
       - key: VITE_WS_BASE
         sync: false
+
+  # 3. Optional Private Cloud OSRM Container (Standard Tier with 2GB RAM)
+  # Uncomment below if deploying private in-house routing cluster on Render:
+  # - type: web
+  #   name: geotrack-osrm
+  #   runtime: docker
+  #   dockerfilePath: backend/osrm/Dockerfile
+  #   plan: standard
+  #   healthCheckPath: /route/v1/driving/77.3396,11.1072;77.3060,11.1542
+  #   envVars:
+  #     - key: PORT
+  #       value: 5000
