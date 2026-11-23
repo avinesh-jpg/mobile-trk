@@ -46,8 +46,8 @@ class AuthRepository(context: Context) {
                 val rootUrl = if (host.contains("/api/v1")) host.substringBefore("/api/v1") + "/" else "$host/"
                 val conn = (URL(rootUrl).openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
-                    connectTimeout = 15000
-                    readTimeout = 15000
+                    connectTimeout = 35000
+                    readTimeout = 35000
                 }
                 conn.responseCode
             } catch (_: Exception) {}
@@ -99,54 +99,63 @@ class AuthRepository(context: Context) {
                 cachedUser.token.isNotBlank() &&
                 !cachedUser.token.startsWith("offline_jwt_token")
 
-        try {
-            // Attempt real backend authentication with a 45s timeout for cloud cold starts
-            val loginUrl = URL("$host/auth/login")
-            val conn = (loginUrl.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "application/json")
-                connectTimeout = 45000
-                readTimeout = 45000
-                doOutput = true
+        // Multi-attempt login with automated cloud-sleep recovery:
+        // If the server was sleeping and times out on attempt 1, wait 2.5s and retry automatically!
+        for (attempt in 1..2) {
+            try {
+                val loginUrl = URL("$host/auth/login")
+                val conn = (loginUrl.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("Accept", "application/json")
+                    connectTimeout = 35000
+                    readTimeout = 35000
+                    doOutput = true
+                }
+
+                val body = JSONObject().apply {
+                    put("email", email)
+                    put("password", pass)
+                }.toString()
+
+                OutputStreamWriter(conn.outputStream).use { it.write(body) }
+                val code = conn.responseCode
+
+                if (code in 200..299) {
+                    val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+                    val json = JSONObject(responseText)
+                    val token = json.optString("access_token", "")
+                    val cleanName = json.optString(
+                        "name",
+                        email.substringBefore("@").replace(".", " ").split(" ")
+                            .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+                    )
+                    val role = json.optString("role", if (email.contains("admin")) "admin" else "employee")
+                    val userId = json.optString("user_id", "1")
+                    val user = User(
+                        id = userId,
+                        name = cleanName,
+                        email = email,
+                        role = role,
+                        token = token,
+                        serverHost = host
+                    )
+                    saveUser(user, isOffline = false)
+                    return@withContext Result.success(user)
+                } else if (code == 401) {
+                    // Password or email is explicitly wrong: stop immediately, do not retry
+                    return@withContext Result.failure(Exception("Incorrect email or password. Please verify your credentials."))
+                } else {
+                    serverFailureReason = "Server responded with error code $code"
+                }
+            } catch (netEx: Exception) {
+                serverFailureReason = netEx.localizedMessage ?: "Network connection error"
+                if (attempt == 1) {
+                    // Cold-start wakeup recovery: server was triggered on attempt 1; wait 2.5s and retry attempt 2!
+                    delay(2500)
+                    continue
+                }
             }
-
-            val body = JSONObject().apply {
-                put("email", email)
-                put("password", pass)
-            }.toString()
-
-            OutputStreamWriter(conn.outputStream).use { it.write(body) }
-            val code = conn.responseCode
-
-            if (code in 200..299) {
-                val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-                val json = JSONObject(responseText)
-                val token = json.optString("access_token", "")
-                val cleanName = json.optString(
-                    "name",
-                    email.substringBefore("@").replace(".", " ").split(" ")
-                        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
-                )
-                val role = json.optString("role", if (email.contains("admin")) "admin" else "employee")
-                val userId = json.optString("user_id", "1")
-                val user = User(
-                    id = userId,
-                    name = cleanName,
-                    email = email,
-                    role = role,
-                    token = token,
-                    serverHost = host
-                )
-                saveUser(user, isOffline = false)
-                return@withContext Result.success(user)
-            } else if (code == 401) {
-                return@withContext Result.failure(Exception("Incorrect email or password. Please verify your credentials."))
-            } else {
-                serverFailureReason = "Server responded with error code $code"
-            }
-        } catch (netEx: Exception) {
-            serverFailureReason = netEx.localizedMessage ?: "Network connection error"
         }
 
         // 2. If device is offline but driver previously logged in with a verified real token, allow offline resume

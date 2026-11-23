@@ -26,19 +26,34 @@ export default function LoginScreen({ onLoginSuccess }) {
     }
 
     setLoading(true);
-    try {
-      await AsyncStorage.setItem('server_host', DEFAULT_API_HOST);
-      const res = await api.post('/auth/login', { email: email.trim(), password: password.trim() });
-      
-      await AsyncStorage.setItem('auth_token', res.data.access_token);
-      await AsyncStorage.setItem('user_profile', JSON.stringify(res.data));
-      onLoginSuccess(res.data);
-    } catch (err) {
-      const msg = err.response?.data?.detail || 'Unable to connect to server. Please check your credentials.';
-      Alert.alert('Login Failed', msg);
-    } finally {
-      setLoading(false);
+    let lastError = null;
+
+    // Multi-attempt login with automated cloud-sleep recovery
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await AsyncStorage.setItem('server_host', DEFAULT_API_HOST);
+        const res = await api.post('/auth/login', { email: email.trim(), password: password.trim() });
+        
+        await AsyncStorage.setItem('auth_token', res.data.access_token);
+        await AsyncStorage.setItem('user_profile', JSON.stringify(res.data));
+        onLoginSuccess(res.data);
+        return;
+      } catch (err) {
+        lastError = err;
+        // If 401 (wrong password or email), stop immediately
+        if (err.response && err.response.status === 401) {
+          break;
+        }
+        // Cold-start wakeup recovery: server was triggered on attempt 1; wait 2.5s and retry attempt 2
+        if (attempt === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+        }
+      }
     }
+
+    setLoading(false);
+    const msg = lastError?.response?.data?.detail || 'Unable to connect to server. Please check your credentials.';
+    Alert.alert('Login Failed', msg);
   };
 
   return (
