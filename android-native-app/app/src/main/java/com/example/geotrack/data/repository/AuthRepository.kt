@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 class AuthRepository(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("geotrack_auth_prefs", Context.MODE_PRIVATE)
