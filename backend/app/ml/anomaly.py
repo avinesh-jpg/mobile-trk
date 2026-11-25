@@ -43,18 +43,19 @@ def detect_gps_spoofing(
 
     return False
 
-def calculate_real_travel_distance(points: list, min_movement_m: float = 15.0, min_speed_kmh: float = 2.0) -> float:
+def calculate_real_travel_distance(points: list, min_movement_m: float = 20.0, min_speed_kmh: float = 2.5) -> float:
     """
     Filters out indoor GPS jitter/drift and calculates real physical travel distance.
+    - Uses a stationary anchor to prevent indoor micro-jitter drift accumulation.
     - Discards points with poor GPS satellite accuracy (> 35m).
     - Discards impossible velocity leaps (> 140 km/h) caused by cell-tower cold-start jumps.
-    - Discards micro-wobbles while stationary.
     """
     if len(points) < 2:
         return 0.0
 
     total_meters = 0.0
     last_valid_point = None
+    stationary_anchor = None
 
     for pt in points:
         # Ignore points with poor satellite fix (> 35m accuracy)
@@ -64,42 +65,45 @@ def calculate_real_travel_distance(points: list, min_movement_m: float = 15.0, m
 
         if last_valid_point is None:
             last_valid_point = pt
+            stationary_anchor = pt
             continue
-
-        dist = haversine_distance_meters(
-            last_valid_point.latitude, last_valid_point.longitude,
-            pt.latitude, pt.longitude
-        )
 
         # Do not bridge distance across an ended shift
         last_act = getattr(last_valid_point, 'activity_type', '') or ''
         curr_act = getattr(pt, 'activity_type', '') or ''
         if last_act == 'shift_ended' or curr_act == 'shift_started':
             last_valid_point = pt
+            stationary_anchor = pt
             continue
+
+        speed = getattr(pt, 'speed', 0.0) or 0.0
+        activity = getattr(pt, 'activity_type', '') or 'unknown'
+        is_still = (activity in ('still', 'shift_ended')) or (speed < min_speed_kmh)
+
+        # While stationary, never accumulate distance from sensor drift
+        if is_still:
+            last_valid_point = pt
+            continue
+
+        dist_from_last = haversine_distance_meters(
+            last_valid_point.latitude, last_valid_point.longitude,
+            pt.latitude, pt.longitude
+        )
 
         # Velocity check: Calculate real velocity between consecutive fixes
         if pt.recorded_at and last_valid_point.recorded_at:
             time_diff = abs((pt.recorded_at - last_valid_point.recorded_at).total_seconds())
             if time_diff < 0.5:
-                # Concurrent duplicate ping within 500ms
                 continue
-            calculated_speed_kmh = (dist / max(time_diff, 1.0)) * 3.6
+            calculated_speed_kmh = (dist_from_last / max(time_diff, 1.0)) * 3.6
             # If speed > 140 km/h, it is a GPS teleport / cell-tower jump -> DISCARD!
             if calculated_speed_kmh > 140.0:
                 continue
 
-        speed = getattr(pt, 'speed', 0.0) or 0.0
-        activity = getattr(pt, 'activity_type', '') or 'unknown'
-        is_still = (activity == 'still') or (speed < min_speed_kmh)
-
-        # Ignore micro-jitter when stationary (< 15m)
-        if dist < min_movement_m and is_still:
-            continue
-
-        # Valid physical travel movement
-        total_meters += dist
-        last_valid_point = pt
+        # In motion: require meaningful movement (> 10m)
+        if dist_from_last >= 10.0:
+            total_meters += dist_from_last
+            last_valid_point = pt
 
     return total_meters
 

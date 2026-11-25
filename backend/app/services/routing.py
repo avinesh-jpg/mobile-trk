@@ -268,19 +268,66 @@ async def snap_to_roads_hmm(
     if len(pings) < 2:
         return raw_kalman_path, 0.0, 100.0
 
-    # 1. Downsample stationary micro-jitter (< 12 meters apart when still)
-    motion_pings = [pings[0]]
+    # 1. Global Stationary Check:
+    # If employee has no moving pings (all speed < 1.5 m/s or activity still/ended)
+    # or entire trip spans < 35m, the entire session was spent stationary at one spot.
+    first_pt = [pings[0]["latitude"], pings[0]["longitude"]]
+    max_disp_from_start = max(haversine_m(first_pt, [p["latitude"], p["longitude"]]) for p in pings)
+    moving_pings_count = sum(
+        1 for p in pings
+        if (float(p.get("speed") or 0.0) >= 1.5 and str(p.get("activity_type") or "").lower() not in ("still", "shift_ended"))
+    )
+
+    if moving_pings_count == 0 or (max_disp_from_start < 35.0 and moving_pings_count < 3):
+        # Stationary session: lock to clean cluster centroid point, exactly 0.0 km traveled
+        avg_lat = round(sum(p["latitude"] for p in pings) / len(pings), 6)
+        avg_lon = round(sum(p["longitude"] for p in pings) / len(pings), 6)
+        return [[avg_lat, avg_lon]], 0.0, 100.0
+
+    # 2. Stationary Anchor Filter & Motion Compression
+    # When employee is stationary (speed < 1.2 m/s or activity still/shift_ended),
+    # lock coordinates to a single anchor point. Suppress all indoor / building multipath
+    # drift (< 30m) so OSRM never receives wandering points that hop onto adjacent back alleys.
+    motion_pings: List[Dict[str, Any]] = [pings[0]]
+    current_anchor = pings[0]
+
     for p in pings[1:]:
-        dist_prev = haversine_m(
+        spd = float(p.get("speed") or 0.0)
+        act = str(p.get("activity_type") or "unknown").lower()
+        dist_from_anchor = haversine_m(
+            [current_anchor["latitude"], current_anchor["longitude"]],
+            [p["latitude"], p["longitude"]]
+        )
+
+        is_still = (spd < 1.2) or (act in ("still", "shift_ended"))
+
+        # If stationary and within 30m cluster, suppress the point (anchor holds)
+        if is_still and dist_from_anchor < 30.0:
+            continue
+
+        # Real motion: moved outside 30m anchor radius or has moving speed
+        dist_from_prev_motion = haversine_m(
             [motion_pings[-1]["latitude"], motion_pings[-1]["longitude"]],
             [p["latitude"], p["longitude"]]
         )
-        if dist_prev >= 12.0 or (p.get("speed") or 0.0) > 3.0:
+        if dist_from_prev_motion >= 15.0 or spd >= 1.5:
             motion_pings.append(p)
-    if motion_pings[-1] != pings[-1]:
-        motion_pings.append(pings[-1])
+            current_anchor = p
 
-    # 2. Build chunks of up to 8 points (OSRM /match has a hard limit of 10 points)
+    # Ensure last ping is captured if distinct
+    if motion_pings[-1] != pings[-1]:
+        dist_last = haversine_m(
+            [motion_pings[-1]["latitude"], motion_pings[-1]["longitude"]],
+            [pings[-1]["latitude"], pings[-1]["longitude"]]
+        )
+        if dist_last >= 15.0:
+            motion_pings.append(pings[-1])
+
+    if len(motion_pings) < 2:
+        anchor_coord = [motion_pings[0]["latitude"], motion_pings[0]["longitude"]]
+        return [anchor_coord], 0.0, 100.0
+
+    # 3. Build chunks of up to 8 points (OSRM /match has a hard limit of 10 points)
     chunk_size = CHUNK_SIZE
     step = chunk_size - CHUNK_OVERLAP
     chunks: List[List[Dict[str, Any]]] = []
@@ -309,6 +356,7 @@ async def snap_to_roads_hmm(
     async with httpx.AsyncClient(timeout=12.0) as client:
         for chunk in chunks:
             kalman_pts = [[p["latitude"], p["longitude"]] for p in chunk]
+            direct_displacement = haversine_m(kalman_pts[0], kalman_pts[-1])
             direct_dist = sum(
                 haversine_m(kalman_pts[j - 1], kalman_pts[j])
                 for j in range(1, len(kalman_pts))
@@ -325,8 +373,8 @@ async def snap_to_roads_hmm(
                 clean_ts.append(t)
                 last_t = t
 
-            # Snapping radius (25 to 40 meters) to handle highway medians smoothly
-            radiuses = ";".join(str(max(20, min(int(p.get("accuracy", 20)), 40))) for p in chunk)
+            # Snapping radius (20 to 35 meters)
+            radiuses = ";".join(str(max(15, min(int(p.get("accuracy", 20)), 35))) for p in chunk)
             timestamps = ";".join(str(t) for t in clean_ts)
 
             chunk_pts: List[List[float]] = []
@@ -358,8 +406,16 @@ async def snap_to_roads_hmm(
                                 candidate_dist += float(m.get("distance", 0.0) or 0.0)
 
                             # Anti-detour validation:
-                            # Ensure matched distance does not exceed 1.7x direct distance or create huge loop
-                            if direct_dist <= 25.0 or candidate_dist <= max(direct_dist * 1.7, direct_dist + 150.0):
+                            # 1. If displacement is small (< 30m), chunk is stationary.
+                            #    Any match > 45m (e.g. driving around an entire city block) is an artificial detour!
+                            # 2. In active motion: candidate distance cannot exceed 1.5x direct path or displacement + 100m.
+                            if direct_displacement < 30.0:
+                                is_valid_match = (candidate_dist <= 45.0)
+                            else:
+                                max_allowed = max(direct_dist * 1.5, direct_displacement * 1.6 + 100.0)
+                                is_valid_match = (candidate_dist <= max_allowed)
+
+                            if is_valid_match:
                                 chunk_pts = candidate_pts
                                 chunk_dist = candidate_dist
                                 matched_chunks += 1
@@ -367,7 +423,7 @@ async def snap_to_roads_hmm(
                 except Exception:
                     pass
 
-                # 2. If timestamped match was rejected or failed, try pure geometric match (without timestamps/radiuses)
+                # 2. Pure geometric match fallback
                 if not chunk_pts:
                     try:
                         r_geom = await client.get(match_url, params={
@@ -386,7 +442,13 @@ async def snap_to_roads_hmm(
                                     candidate_pts.extend([[round(lat, 6), round(lon, 6)] for lat, lon in pts])
                                     candidate_dist += float(m.get("distance", 0.0) or 0.0)
 
-                                if direct_dist <= 25.0 or candidate_dist <= max(direct_dist * 1.7, direct_dist + 150.0):
+                                if direct_displacement < 30.0:
+                                    is_valid_match = (candidate_dist <= 45.0)
+                                else:
+                                    max_allowed = max(direct_dist * 1.5, direct_displacement * 1.6 + 100.0)
+                                    is_valid_match = (candidate_dist <= max_allowed)
+
+                                if is_valid_match:
                                     chunk_pts = candidate_pts
                                     chunk_dist = candidate_dist
                                     matched_chunks += 1
@@ -395,14 +457,11 @@ async def snap_to_roads_hmm(
                         pass
 
             # 3. Clean Fallback to Kalman Filtered Coordinates
-            # When road matching is unavailable or returns an artificial one-way detour loop,
-            # use the clean Kalman-filtered GPS coordinates!
-            # The Kalman filter has already removed micro-jitter and indoor noise,
-            # so it stays strictly on the highway (NH 381) without taking fake loops through
-            # residential neighborhoods, parallel alleys, or opposite-side carriageways.
+            # When road matching is unavailable or returns an artificial detour loop,
+            # use clean Kalman-filtered GPS coordinates!
             if not chunk_pts:
                 chunk_pts = kalman_pts
-                chunk_dist = direct_dist
+                chunk_dist = direct_dist if direct_displacement >= 20.0 else 0.0
 
             # Append smoothly without duplicate joint point
             if not snapped_path:
@@ -417,6 +476,13 @@ async def snap_to_roads_hmm(
 
     if not total_distance_m and len(snapped_path) >= 2:
         total_distance_m = sum(haversine_m(snapped_path[j - 1], snapped_path[j]) for j in range(1, len(snapped_path)))
+
+    # Guard: If entire snapped path spans less than 25m, vehicle never physically traveled
+    if len(snapped_path) >= 2:
+        max_span = max(haversine_m(snapped_path[0], pt) for pt in snapped_path)
+        if max_span < 25.0:
+            total_distance_m = 0.0
+            snapped_path = [snapped_path[0]]
 
     total_dist_km = total_distance_m / 1000.0
     confidence_pct = round((matched_chunks / max(len(chunks), 1)) * 100.0, 1)
