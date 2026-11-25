@@ -17,7 +17,7 @@ def register_user(user_in: UserRegister, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A user with this email already exists."
         )
-    
+    # Hash the password and create a new user record
     hashed_pwd = get_password_hash(user_in.password)
     new_user = User(
         name=user_in.name,
