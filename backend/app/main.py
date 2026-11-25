@@ -33,7 +33,7 @@ app.include_router(geofence.router, prefix=settings.API_V1_STR)
 app.include_router(analytics.router, prefix=settings.API_V1_STR)
 app.include_router(websocket.router)
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {
         "status": "online",
@@ -48,3 +48,7 @@ def root():
             "live_websocket": "/ws/live"
         }
     }
+
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health():
+    return {"status": "ok", "service": "GeoTrack API"}
