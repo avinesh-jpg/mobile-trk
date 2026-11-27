@@ -89,7 +89,7 @@ fun LoginScreen(
             ) {
                 Icon(
                     imageVector = Icons.Default.Navigation,
-                    contentDescription = "CM Vechicle Logo",
+                    contentDescription = "CM Vehicle Logo",
                     tint = CyanPrimary,
                     modifier = Modifier.size(38.dp)
                 )
@@ -98,7 +98,7 @@ fun LoginScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "CM Vechicle",
+                text = "CM Vehicle",
                 fontSize = 28.sp,
                 fontWeight = FontWeight.Bold,
                 color = CyanPrimary,

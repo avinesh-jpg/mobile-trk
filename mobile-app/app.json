@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "CM Vechicle",
-    "slug": "cm-vechicle",
+    "name": "CM Vehicle",
+    "slug": "cm-vehicle",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -34,7 +34,7 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow CM Vechicle to access your location to track travel and client visits."
+          "locationAlwaysAndWhenInUsePermission": "Allow CM Vehicle to access your location to track travel and client visits."
         }
       ]
     ],

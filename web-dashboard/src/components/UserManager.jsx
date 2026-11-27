@@ -92,7 +92,7 @@ export default function UserManager() {
 
   const copyCredentials = () => {
     if (!successInfo) return;
-    const text = `CM Vechicle Mobile App Login:\nEmail: ${successInfo.email}\nPassword: ${successInfo.password}`;
+    const text = `CM Vehicle Mobile App Login:\nEmail: ${successInfo.email}\nPassword: ${successInfo.password}`;
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -111,7 +111,7 @@ export default function UserManager() {
             <div>
               <h1 className="text-xl font-bold text-white tracking-tight">Driver & Personnel Management</h1>
               <p className="text-xs text-slate-400">
-                Register new drivers and field staff for the <span className="text-cyan-400 font-semibold">CM Vechicle</span> mobile app
+                Register new drivers and field staff for the <span className="text-cyan-400 font-semibold">CM Vehicle</span> mobile app
               </p>
             </div>
           </div>
@@ -264,7 +264,7 @@ export default function UserManager() {
                     <span>Account Created Successfully!</span>
                   </div>
                   <p className="text-emerald-400/90 text-[11px]">
-                    Share these login details with the driver to log in to the <span className="font-bold">CM Vechicle</span> app.
+                    Share these login details with the driver to log in to the <span className="font-bold">CM Vehicle</span> app.
                   </p>
                 </div>
 

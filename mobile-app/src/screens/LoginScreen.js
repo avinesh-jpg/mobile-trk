@@ -63,7 +63,7 @@ export default function LoginScreen({ onLoginSuccess }) {
     >
       <View style={styles.card}>
         <View style={styles.header}>
-          <Text style={styles.title}>CM Vechicle</Text>
+          <Text style={styles.title}>CM Vehicle</Text>
           <Text style={styles.subtitle}>Fleet Vehicle Tracking</Text>
         </View>
 

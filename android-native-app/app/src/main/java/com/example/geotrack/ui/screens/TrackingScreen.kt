@@ -103,10 +103,13 @@ fun TrackingScreen(
     var showAfterHoursDialog by remember { mutableStateOf(false) }
     var startShiftPending by remember { mutableStateOf(false) }
 
-    // Re-verify permission, GPS state, and sync offline points when app returns to foreground
+    // Re-verify permission, GPS state, and ensure tracking service is actively running when app returns to foreground
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         hasLocationPermission = hasLocationPermissions(context)
         isGpsHardwareEnabled = isDeviceLocationEnabled(context)
+        if (isShiftActive && hasLocationPermission && isGpsHardwareEnabled) {
+            LocationTrackingService.startService(context)
+        }
         scope.launch {
             trackingRepository.syncOfflineLocations()
         }
@@ -205,7 +208,7 @@ fun TrackingScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Navigation,
-                        contentDescription = "CM Vechicle",
+                        contentDescription = "CM Vehicle",
                         tint = CyanPrimary,
                         modifier = Modifier.size(24.dp)
                     )
@@ -213,7 +216,7 @@ fun TrackingScreen(
 
                 Column {
                     Text(
-                        text = "CM Vechicle",
+                        text = "CM Vehicle",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
@@ -394,7 +397,7 @@ fun TrackingScreen(
             },
             text = {
                 Text(
-                    text = "CM Vechicle requires location access to record accurate GPS coordinates and track your vehicle route during your active shift.\n\nPlease grant location permission to start tracking.",
+                    text = "CM Vehicle requires location access to record accurate GPS coordinates and track your vehicle route during your active shift.\n\nPlease grant location permission to start tracking.",
                     color = TextSecondary,
                     fontSize = 14.sp
                 )
@@ -427,7 +430,7 @@ fun TrackingScreen(
             },
             text = {
                 Text(
-                    text = "Please turn on your phone's Location / GPS in Android Settings so CM Vechicle can track your route.",
+                    text = "Please turn on your phone's Location / GPS in Android Settings so CM Vehicle can track your route.",
                     color = TextSecondary,
                     fontSize = 14.sp
                 )

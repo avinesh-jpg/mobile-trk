@@ -38,7 +38,7 @@ class GeoTrackApp : Application() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 TRACKING_CHANNEL_ID,
-                "CM Vechicle Shift Tracking",
+                "CM Vehicle Shift Tracking",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Shows persistent foreground status during active work shifts"

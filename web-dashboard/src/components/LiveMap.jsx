@@ -15,15 +15,41 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Dynamic Status Calculation: Office vs On The Way vs Client vs Stopped vs Offline
+// Dynamic Status Calculation: Office vs On The Way vs Client vs Stopped vs Offline vs Shift Ended
 function getEmployeeStatus(emp, geofences = []) {
-  if (!emp.is_online || !emp.latest_location || emp.latest_location.activity_type === 'shift_ended') {
+  if (!emp.latest_location) {
+    return {
+      label: 'No Data',
+      type: 'offline',
+      bgClass: 'bg-slate-800 text-slate-400 border-slate-700',
+      icon: '⚪',
+      description: 'No GPS data recorded yet'
+    };
+  }
+
+  // Explicit Shift Ended: Driver tapped "End Shift" on mobile
+  if (emp.latest_location.activity_type === 'shift_ended') {
     return {
       label: 'Shift Ended',
       type: 'offline',
       bgClass: 'bg-slate-800 text-slate-400 border-slate-700',
       icon: '⚪',
-      description: 'Shift Inactive / Stopped'
+      description: 'Shift clocked out by driver'
+    };
+  }
+
+  // Device not sending pings (>5 mins), but driver is STILL on active shift
+  if (!emp.is_online) {
+    const lastPingTime = emp.latest_location.recorded_at
+      ? new Date(emp.latest_location.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : null;
+    return {
+      label: 'Offline (No Signal)',
+      subText: lastPingTime ? `Last seen ${lastPingTime}` : 'Signal lost',
+      type: 'offline',
+      bgClass: 'bg-amber-500/20 text-amber-400 border-amber-500/40',
+      icon: '🟠',
+      description: 'Active shift - device offline / waiting for signal'
     };
   }
 
@@ -226,7 +252,7 @@ export default function LiveMap({ onNavigateTab }) {
             <div className="p-6 text-center text-slate-400 bg-slate-800/30 rounded-xl border border-slate-800">
               <Users className="w-8 h-8 mx-auto text-slate-500 mb-2" />
               <p className="text-sm font-medium text-slate-300">No field drivers registered yet</p>
-              <p className="text-xs text-slate-500 mt-1 mb-3">Add drivers and login credentials for the CM Vechicle app.</p>
+              <p className="text-xs text-slate-500 mt-1 mb-3">Add drivers and login credentials for the CM Vehicle app.</p>
               {onNavigateTab && (
                 <button
                   onClick={() => onNavigateTab('users')}

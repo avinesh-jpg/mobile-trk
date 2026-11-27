@@ -18,6 +18,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.example.geotrack.GeoTrackApp
 import com.example.geotrack.MainActivity
@@ -45,6 +46,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     private var lastKnownLocation: Location? = null
     private var lastRecordedPingTime: Long = 0L
     private var heartbeatJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     companion object {
         const val ACTION_START = "ACTION_START_TRACKING"
@@ -89,12 +91,44 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
                 }
             }
             ACTION_STOP -> stopTrackingService()
+            else -> {
+                // System restarted service after OS killed it under battery/memory pressure (START_STICKY)
+                if (GeoTrackApp.instance.trackingRepository.isShiftActive.value) {
+                    startTrackingService()
+                } else {
+                    stopTrackingService()
+                }
+            }
         }
-        return START_NOT_STICKY
+        return START_STICKY
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GeoTrack::LocationTrackingWakeLock")?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(14 * 60 * 60 * 1000L) // 14 hours max duty safety timeout
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            wakeLock = null
+        } catch (_: Exception) {}
     }
 
     private fun startTrackingService() {
-        val notification = buildForegroundNotification("CM Vechicle Active", "Live vehicle tracking active (4s high-precision stream)")
+        acquireWakeLock()
+        val notification = buildForegroundNotification("CM Vehicle Active", "Live vehicle tracking active (4s high-precision stream)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
@@ -107,6 +141,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     private fun stopTrackingService() {
+        releaseWakeLock()
         heartbeatJob?.cancel()
         unregisterSensors()
         unregisterLocationUpdates()
@@ -142,7 +177,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
                     lm.requestLocationUpdates(
                         LocationManager.GPS_PROVIDER,
                         4000L,
-                        5.0f,
+                        0f,
                         this
                     )
                 }
@@ -150,7 +185,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
                     lm.requestLocationUpdates(
                         LocationManager.NETWORK_PROVIDER,
                         8000L,
-                        10.0f,
+                        0f,
                         this
                     )
                 }
@@ -318,6 +353,7 @@ class LocationTrackingService : Service(), LocationListener, SensorEventListener
     }
 
     override fun onDestroy() {
+        releaseWakeLock()
         heartbeatJob?.cancel()
         unregisterSensors()
         unregisterLocationUpdates()

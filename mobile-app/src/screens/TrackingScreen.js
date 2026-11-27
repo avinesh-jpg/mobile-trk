@@ -234,7 +234,7 @@ export default function TrackingScreen({ user, onLogout }) {
                 timeInterval: 4000,
                 distanceInterval: 6,
                 foregroundService: {
-                  notificationTitle: 'CM Vechicle Active',
+                  notificationTitle: 'CM Vehicle Active',
                   notificationBody: 'Live tracking active (high-precision 4s stream).',
                   notificationColor: '#0284c7',
                 },
@@ -294,7 +294,7 @@ export default function TrackingScreen({ user, onLogout }) {
               </Text>
             </View>
             <View>
-              <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#06b6d4', textTransform: 'uppercase' }}>CM Vechicle</Text>
+              <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#06b6d4', textTransform: 'uppercase' }}>CM Vehicle</Text>
               <Text style={styles.userName}>{user.name || user.email}</Text>
             </View>
           </View>
